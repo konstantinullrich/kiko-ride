@@ -18,7 +18,8 @@ type Facilitator interface {
 }
 
 // HTTPFacilitator talks to an x402 facilitator's /verify and /settle
-// endpoints. The facilitator must list a cardano:* network in /supported.
+// endpoints. The facilitator must list the network it is configured for in
+// /supported.
 type HTTPFacilitator struct {
 	// URL is the facilitator base URL, e.g. "http://localhost:4022".
 	URL string

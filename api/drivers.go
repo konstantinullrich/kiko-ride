@@ -2,7 +2,6 @@ package api
 
 import (
 	"cmp"
-	"encoding/hex"
 	"errors"
 	"net/http"
 	"slices"
@@ -10,15 +9,20 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Salvionied/apollo/v2/backend"
-	"github.com/blinklabs-io/gouroboros/cbor"
-
 	"kiko-backend/geo"
-	"kiko-backend/multisig"
+	"kiko-backend/x402"
 )
 
+// driverView is a registered driver with the network their fares are paid
+// on.
+type driverView struct {
+	Driver
+	Network x402.Network `json:"network"`
+}
+
 // createDriver registers a driver, or replaces their profile. The request
-// must be signed by the public_key it registers.
+// must be signed by the public_key it registers. The format of that key
+// decides the chain they are paid on and so the currency of their fees.
 func (s *Server) createDriver(w http.ResponseWriter, r *http.Request) {
 	body, ok := readBody(w, r)
 	if !ok {
@@ -28,11 +32,12 @@ func (s *Server) createDriver(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &d) {
 		return
 	}
-	d.PublicKey = normalizeKey(d.PublicKey)
-	if err := s.cfg.Cosigner.CheckCosignerKey(d.PublicKey); err != nil {
-		writeError(w, http.StatusBadRequest, "public_key must be an acct_shared_xvk cosigner key: "+err.Error())
+	chain, key, err := s.checkCosignerKey(d.PublicKey)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "public_key: "+err.Error())
 		return
 	}
+	d.PublicKey, d.Chain = key, chain
 	if !s.checkSignature(w, r, d.PublicKey, body) {
 		return
 	}
@@ -50,19 +55,22 @@ func (s *Server) createDriver(w http.ResponseWriter, r *http.Request) {
 		s.storeError(w, "put driver", err)
 		return
 	}
+	status, event := http.StatusCreated, "driver registered"
 	if !created {
-		s.log.Info("driver updated", "driver", d.PublicKey, "base_fee", d.BaseFee, "fee_per_km", d.FeePerKm)
-		writeJSON(w, http.StatusOK, d)
-		return
+		status, event = http.StatusOK, "driver updated"
 	}
-	s.log.Info("driver registered", "driver", d.PublicKey, "base_fee", d.BaseFee, "fee_per_km", d.FeePerKm)
-	writeJSON(w, http.StatusCreated, d)
+	s.log.Info(event, "driver", d.PublicKey, "chain", d.Chain, "base_fee", d.BaseFee, "fee_per_km", d.FeePerKm)
+	writeJSON(w, status, driverView{Driver: d, Network: s.network(d.Chain)})
 }
 
-// normalizeKey trims a bech32 key and lowercases it; bech32 is case
-// insensitive, so both spellings name the same driver.
-func normalizeKey(key string) string {
-	return strings.ToLower(strings.TrimSpace(key))
+// rideChain returns the chain a requested ride is tied to by its rider's
+// key; a custodial ride is open to any chain and returns "".
+func rideChain(r Ride) Chain {
+	if r.RiderKey == "" {
+		return ""
+	}
+	chain, _, _ := parseKey(r.RiderKey)
+	return chain
 }
 
 // currentDriver resolves the X-Driver-Key header and checks the request's
@@ -100,10 +108,11 @@ type availableRide struct {
 	PickupTime       string    `json:"pickup_time"`
 }
 
-// availableRides lists requested rides whose pickup lies within range km of
-// location, nearest first.
+// availableRides lists requested rides the driver can take whose pickup
+// lies within range km of location, nearest first.
 func (s *Server) availableRides(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.currentDriver(w, r); !ok {
+	driver, ok := s.currentDriver(w, r)
+	if !ok {
 		return
 	}
 	loc, err := geo.ParsePoint(r.URL.Query().Get("location"))
@@ -126,6 +135,9 @@ func (s *Server) availableRides(w http.ResponseWriter, r *http.Request) {
 	}
 	out := []availableRide{}
 	for _, ride := range requested {
+		if c := rideChain(ride); c != "" && c != driver.Chain {
+			continue
+		}
 		d := geo.Distance(loc, ride.Start)
 		if d > rangeKm {
 			continue
@@ -172,26 +184,18 @@ func (s *Server) acceptRide(w http.ResponseWriter, r *http.Request) {
 		s.storeError(w, "ride", err)
 		return
 	}
+	if c := rideChain(pending); c != "" && c != d.Chain {
+		writeError(w, http.StatusUnprocessableEntity, "the rider pays on "+string(c)+"; this driver is paid on "+string(d.Chain))
+		return
+	}
 	// The address index and rider key are fixed at creation, so the address
 	// can be derived before taking the ride.
-	wallet, _, err := s.cfg.Cosigner.RideWallet(d.PublicKey, pending.RiderKey)
+	payTo, script, err := s.rideAddress(d.Chain, d.PublicKey, pending.RiderKey, pending.AddressIndex)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "cannot form the ride wallet: "+err.Error())
 		return
 	}
-	payTo, err := wallet.Address(pending.AddressIndex)
-	if err != nil {
-		s.log.Error("derive ride address", "ride", rideID, "index", pending.AddressIndex, "err", err)
-		writeError(w, http.StatusInternalServerError, "could not derive the ride address")
-		return
-	}
-	script, err := cbor.Encode(&payTo.Script)
-	if err != nil {
-		s.log.Error("encode ride script", "ride", rideID, "err", err)
-		writeError(w, http.StatusInternalServerError, "could not derive the ride address")
-		return
-	}
-	ride, err := s.store.accept(rideID, d, payTo.String(), hex.EncodeToString(script), req.EtaMinutes, req.EtaKm)
+	ride, err := s.store.accept(rideID, d, payTo, script, req.EtaMinutes, req.EtaKm)
 	switch {
 	case errors.Is(err, errNotFound):
 		writeError(w, http.StatusNotFound, "ride not found")
@@ -201,7 +205,7 @@ func (s *Server) acceptRide(w http.ResponseWriter, r *http.Request) {
 		s.storeError(w, "accept", err)
 	default:
 		s.log.Info("ride accepted", "ride", rideID, "driver", d.PublicKey, "index", ride.AddressIndex,
-			"pay_to", ride.PayTo, "fare", ride.FareLovelace, "custodial", ride.RiderKey == "")
+			"pay_to", ride.PayTo, "chain", ride.Chain, "fare", ride.Fare, "custodial", ride.RiderKey == "")
 		writeJSON(w, http.StatusOK, s.view(ride, true))
 	}
 }
@@ -223,8 +227,9 @@ func (s *Server) driverRide(w http.ResponseWriter, r *http.Request) {
 }
 
 type payoutRequest struct {
-	// Transaction is the hex CBOR of a transaction spending the ride address,
-	// already signed by the driver's key at the ride's address index.
+	// Transaction spends the ride address, already signed by the driver's
+	// key at the ride's address index: hex CBOR on Cardano, hex Extended
+	// Format on BSV.
 	Transaction string `json:"transaction"`
 }
 
@@ -239,11 +244,6 @@ func (s *Server) payout(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	txCbor, err := hex.DecodeString(strings.TrimSpace(req.Transaction))
-	if err != nil || len(txCbor) == 0 {
-		writeError(w, http.StatusBadRequest, "transaction must be hex CBOR")
-		return
-	}
 	rideID := r.PathValue("ride_id")
 	ride, err := s.store.ride(rideID)
 	if errors.Is(err, errNotFound) || (err == nil && ride.DriverKey != d.PublicKey) {
@@ -253,20 +253,19 @@ func (s *Server) payout(w http.ResponseWriter, r *http.Request) {
 		s.storeError(w, "ride", err)
 		return
 	}
-	wallet, _, err := s.cfg.Cosigner.RideWallet(d.PublicKey, ride.RiderKey)
-	if err != nil {
+	txID, signed, submit, err := s.cosignPayout(ride, strings.TrimSpace(req.Transaction))
+	switch {
+	case errors.Is(err, errBadPayout):
+		s.log.Warn("payout refused", "ride", rideID, "err", err)
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	case errors.Is(err, errMissingSignature), errors.Is(err, errCannotCosign):
+		s.log.Warn("payout refused", "ride", rideID, "err", err)
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	case err != nil:
 		s.log.Error("ride wallet", "ride", rideID, "err", err)
 		writeError(w, http.StatusInternalServerError, "could not form the ride wallet")
-		return
-	}
-	signed, txID, err := s.cfg.Cosigner.Cosign(wallet, ride.AddressIndex, d.PublicKey, txCbor)
-	if errors.Is(err, multisig.ErrMissingSignature) {
-		s.log.Warn("payout refused", "ride", rideID, "reason", "not signed by the driver")
-		writeError(w, http.StatusUnprocessableEntity, "transaction must be signed by the driver first")
-		return
-	} else if err != nil {
-		s.log.Warn("payout refused", "ride", rideID, "reason", "cannot cosign", "err", err)
-		writeError(w, http.StatusUnprocessableEntity, "cannot cosign: "+err.Error())
 		return
 	}
 	// The signed transaction never leaves the server unless the payout is
@@ -284,21 +283,21 @@ func (s *Server) payout(w http.ResponseWriter, r *http.Request) {
 		s.storeError(w, "begin payout", err)
 		return
 	}
-	s.log.Info("submitting payout", "ride", rideID, "tx", txID, "index", ride.AddressIndex, "size", len(signed))
-	if _, err := backend.SubmitTxContext(r.Context(), s.cfg.Chain, signed); err != nil {
-		if _, ferr := s.store.finishPayout(rideID, txID.String(), false); ferr != nil {
+	s.log.Info("submitting payout", "ride", rideID, "chain", ride.Chain, "tx", txID, "index", ride.AddressIndex)
+	if err := submit(r.Context()); err != nil {
+		if _, ferr := s.store.finishPayout(rideID, txID, false); ferr != nil {
 			s.log.Error("store", "op", "finish payout", "ride", rideID, "err", ferr)
 		}
-		s.log.Warn("submit payout", "ride", rideID, "tx", txID, "tx_cbor", hex.EncodeToString(signed), "err", err)
+		s.log.Warn("submit payout", "ride", rideID, "tx", txID, "tx_hex", signed, "err", err)
 		writeError(w, http.StatusBadGateway, "payout rejected: "+err.Error())
 		return
 	}
-	paidOut, err := s.store.finishPayout(rideID, txID.String(), true)
+	paidOut, err := s.store.finishPayout(rideID, txID, true)
 	if err != nil {
 		// Submitted but not recorded: the ride stays paid and a repeated
 		// payout is refused by the chain, its inputs being spent.
 		s.log.Error("store", "op", "finish payout", "ride", rideID, "tx", txID, "submitted", true, "err", err)
-		writeError(w, http.StatusInternalServerError, "payout "+txID.String()+" submitted but not recorded")
+		writeError(w, http.StatusInternalServerError, "payout "+txID+" submitted but not recorded")
 		return
 	}
 	s.log.Info("payout submitted", "ride", rideID, "tx", txID)

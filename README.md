@@ -11,6 +11,7 @@ which the server cosigns and submits.
 - `api/` — HTTP API ([endpoints](api/endpoints.md)), and the rider endpoints
   as an MCP server at `/mcp` ([tools](api/endpoints.md#mcp-server))
 - `multisig/` — CIP-1854 multisig wallets and the server cosigner
+- `bsvmultisig/` — the same for Bitcoin SV (bare 2-of-3 multisig)
 - `x402/` — x402 payment middleware
 - `geo/` — geocoding (Mapbox) and distances
 
@@ -39,6 +40,8 @@ docker run -p 8080:8080 --env-file .env -v kiko-data:/data kiko-backend
 | `X402_FACILITATOR_URL`     | no       | Required outside preprod; defaults to the Cardano Foundation's    |
 | `KOIOS_URL`                | no       | Koios base URL; defaults to the public instance for the network   |
 | `KOIOS_API_TOKEN`          | no       | Koios bearer token; the public tier is used when unset            |
+| `BSV_FACILITATOR_URL`      | no       | x402 facilitator for BSV fares; enables BSV drivers and riders    |
+| `BSV_ARC_URL`              | with BSV | ARC endpoint that submits BSV payouts (`BSV_ARC_API_KEY` optional) |
 | `KIKO_LISTEN_ADDR`         | no       | Default `:8080`                                                   |
 | `KIKO_DB_PATH`             | no       | SQLite database file, default `kiko.db` (`/data/kiko.db` in Docker) |
 | `MAPBOX_PERMANENT`         | no       | `true` for permanent geocoding                                    |

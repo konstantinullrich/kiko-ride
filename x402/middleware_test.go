@@ -110,7 +110,7 @@ func newFixture(t *testing.T) fixture {
 
 func newMiddleware(t *testing.T, f Facilitator) *Middleware {
 	t.Helper()
-	m, err := New(Config{Network: Preprod, Facilitator: f})
+	m, err := New(Config{Networks: []NetworkConfig{{Network: Preprod, Facilitator: f}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func paidRequest(t *testing.T, path string, accepted PaymentRequirements, txB64 
 	raw, _ := json.Marshal(PaymentPayload{
 		X402Version: Version,
 		Accepted:    accepted,
-		Payload:     CardanoPayload{Transaction: txB64, Nonce: hex.EncodeToString(make([]byte, 32)) + "#0"},
+		Payload:     TransactionPayload{Transaction: txB64, Nonce: hex.EncodeToString(make([]byte, 32)) + "#0"},
 	})
 	req := httptest.NewRequest(http.MethodGet, path, nil)
 	req.Header.Set(HeaderPaymentSignature, base64.StdEncoding.EncodeToString(raw))
@@ -166,11 +166,11 @@ func quote(t *testing.T, h http.Handler, path string) PaymentRequirements {
 func TestPerRequestPrice(t *testing.T) {
 	fx := newFixture(t)
 	m := newMiddleware(t, okFacilitator())
-	h := m.Require(func(r *http.Request) (Price, error) {
+	h := m.Require(func(r *http.Request) ([]Price, error) {
 		if strings.HasPrefix(r.URL.Path, "/gold") {
-			return Price{PayTo: fx.addrB, Amount: 5_000_000, Description: "gold"}, nil
+			return []Price{{PayTo: fx.addrB, Amount: 5_000_000, Description: "gold"}}, nil
 		}
-		return Price{PayTo: fx.addrA, Amount: 1_500_000}, nil
+		return []Price{{PayTo: fx.addrA, Amount: 1_500_000}}, nil
 	})(okHandler)
 
 	basic := quote(t, h, "/basic")

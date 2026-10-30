@@ -34,8 +34,8 @@ import (
 	"kiko-backend/x402"
 )
 
-// MinFareLovelace is the lowest fare charged. A pure-lovelace payment output
-// must clear the ledger's min-UTxO, roughly 1 ADA.
+// MinFareLovelace is the lowest Cardano fare charged. A pure-lovelace payment
+// output must clear the ledger's min-UTxO, roughly 1 ADA.
 const MinFareLovelace = 1_000_000
 
 // DefaultSearchRangeKm is used when GET .../available has no range.
@@ -60,8 +60,10 @@ type Config struct {
 	Geocoder geo.Geocoder
 	// Payments gates GET /api/v1/ride/{id}.
 	Payments *x402.Middleware
-	// Chain submits driver payouts.
+	// Chain submits Cardano driver payouts.
 	Chain backend.ChainContext
+	// BSV, when set, accepts drivers and riders with BSV keys.
+	BSV *BSVConfig
 	// Logger defaults to slog.Default().
 	Logger *slog.Logger
 }
@@ -75,6 +77,9 @@ type Server struct {
 func New(cfg Config) (*Server, error) {
 	if cfg.Cosigner == nil || cfg.DB == nil || cfg.Geocoder == nil || cfg.Payments == nil || cfg.Chain == nil {
 		return nil, errors.New("cosigner, db, geocoder, payments and chain are required")
+	}
+	if b := cfg.BSV; b != nil && (b.Cosigner == nil || b.Broadcaster == nil || b.Network == "") {
+		return nil, errors.New("bsv needs a network, cosigner and broadcaster")
 	}
 	log := cfg.Logger
 	if log == nil {
@@ -103,10 +108,14 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// fare is base_fee + fee_per_km × km, rounded up to the lovelace and never
-// below MinFareLovelace.
+// fare is base_fee + fee_per_km × km in the driver's currency, rounded up to
+// its smallest unit and never below MinFareLovelace on Cardano or
+// MinFareSatoshi on BSV.
 func fare(d Driver, km float64) uint64 {
 	f := d.BaseFee + uint64(math.Ceil(float64(d.FeePerKm)*km))
+	if d.Chain == ChainBSV {
+		return max(f, MinFareSatoshi)
+	}
 	return max(f, MinFareLovelace)
 }
 

@@ -103,7 +103,7 @@ func TestMCPRideLifecycle(t *testing.T) {
 	raw, _ := json.Marshal(x402.PaymentPayload{
 		X402Version: x402.Version,
 		Accepted:    pr.Accepts[0],
-		Payload:     x402.CardanoPayload{Transaction: e.txB64, Nonce: hex.EncodeToString(make([]byte, 32)) + "#0"},
+		Payload:     x402.TransactionPayload{Transaction: e.txB64, Nonce: hex.EncodeToString(make([]byte, 32)) + "#0"},
 	})
 	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "get_ride", Arguments: map[string]any{
 		"id": ride.ID, "payment_signature": base64.StdEncoding.EncodeToString(raw),
