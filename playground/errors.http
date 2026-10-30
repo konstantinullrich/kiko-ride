@@ -13,6 +13,20 @@ GET {{host}}/api/v1/search
 ### 400: search limit out of range
 GET {{host}}/api/v1/search?q={{end_address_query}}&limit=11
 
+### 400: quote with bad start coordinates
+GET {{host}}/api/v1/ride?start_address={{start_address_query}}&end_address={{end_address_query}}&start=north
+
+### 400: ride with out-of-range coordinates
+POST {{host}}/api/v1/ride
+Content-Type: application/json
+
+{
+  "start_address": "{{start_address}}",
+  "end_address": "{{end_address}}",
+  "pickup_time": "{{$isoTimestamp}}",
+  "start": { "lat": 91, "lng": 0 }
+}
+
 ### 400: ride without pickup_time
 POST {{host}}/api/v1/ride
 Content-Type: application/json

@@ -28,6 +28,9 @@ GET {{host}}/api/v1/search?q={{start_address_query}}&limit=5
 ### 2. Quote the ride (fare range over registered drivers)
 GET {{host}}/api/v1/ride?start_address={{start_address_query}}&end_address={{end_address_query}}
 
+### 2b. Quote with coordinates (skips geocoding; addresses are labels)
+GET {{host}}/api/v1/ride?start_address={{start_address_query}}&end_address={{end_address_query}}&start={{start_point}}&end={{end_point}}
+
 ### 3a. Request a ride with the rider's cosigner key
 POST {{host}}/api/v1/ride
 Content-Type: application/json
@@ -52,6 +55,21 @@ Content-Type: application/json
   "start_address": "{{start_address}}",
   "end_address": "{{end_address}}",
   "pickup_time": "{{$isoTimestamp}}"
+}
+
+> {% client.global.set("ride_id", response.body.id); %}
+
+### 3c. Or: request a ride at coordinates (e.g. picked from search)
+POST {{host}}/api/v1/ride
+Content-Type: application/json
+
+{
+  "start_address": "{{start_address}}",
+  "end_address": "{{end_address}}",
+  "pickup_time": "{{$isoTimestamp}}",
+  "cosigner_key": "{{rider_key}}",
+  "start": { "lat": 52.5251, "lng": 13.3694 },
+  "end": { "lat": 52.521666, "lng": 13.413191 }
 }
 
 > {% client.global.set("ride_id", response.body.id); %}

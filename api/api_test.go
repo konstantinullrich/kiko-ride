@@ -433,6 +433,42 @@ func TestQuoteAndUnknownAddress(t *testing.T) {
 	expect(t, e.do(t, http.MethodGet, "/api/v1/ride?start_address=Nowhere&end_address=Alexanderplatz", "", nil), http.StatusUnprocessableEntity)
 }
 
+func TestRideCoordinates(t *testing.T) {
+	e := newEnv(t)
+	// The fake geocoder knows neither address, so only the coordinates count.
+	start, end := geo.Point{Lat: 52.5251, Lng: 13.3694}, geo.Point{Lat: 52.5219, Lng: 13.4132}
+	rec := e.do(t, http.MethodGet, "/api/v1/ride?start_address=Hbf&end_address=Alex&start=52.5251,13.3694&end=52.5219,13.4132", "", nil)
+	expect(t, rec, http.StatusOK)
+	if q := decode[quote](t, rec); q.Start != start || q.End != end || q.StartAddress != "Hbf" {
+		t.Fatalf("unexpected quote: %+v", q)
+	}
+
+	rec = e.do(t, http.MethodPost, "/api/v1/ride", "", map[string]any{
+		"start_address": "Hbf",
+		"end_address":   "Alex",
+		"pickup_time":   "2026-11-01T09:00:00Z",
+		"start":         start,
+		"end":           end,
+	})
+	expect(t, rec, http.StatusCreated)
+	if r := decode[rideView](t, rec); r.Start != start || r.End != end || r.DistanceKm < 2.9 || r.DistanceKm > 3.3 {
+		t.Fatalf("unexpected ride: %+v", r)
+	}
+
+	// Coordinates for one side only: the other address is still geocoded.
+	rec = e.do(t, http.MethodGet, "/api/v1/ride?start_address=Hbf&end_address=Alexanderplatz&start=52.5251,13.3694", "", nil)
+	expect(t, rec, http.StatusOK)
+	expect(t, e.do(t, http.MethodGet, "/api/v1/ride?start_address=Hbf&end_address=Alex&start=52.5251,13.3694", "", nil), http.StatusUnprocessableEntity)
+
+	expect(t, e.do(t, http.MethodGet, "/api/v1/ride?start_address=Hbf&end_address=Alexanderplatz&start=north", "", nil), http.StatusBadRequest)
+	expect(t, e.do(t, http.MethodPost, "/api/v1/ride", "", map[string]any{
+		"start_address": "Hbf",
+		"end_address":   "Alexanderplatz",
+		"pickup_time":   "2026-11-01T09:00:00Z",
+		"start":         geo.Point{Lat: 91, Lng: 0},
+	}), http.StatusBadRequest)
+}
+
 func TestSearch(t *testing.T) {
 	e := newEnv(t)
 	rec := e.do(t, http.MethodGet, "/api/v1/search?q=Alexander", "", nil)

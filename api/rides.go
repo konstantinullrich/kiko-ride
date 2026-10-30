@@ -73,12 +73,17 @@ func (s *Server) view(r Ride, forDriver bool) rideView {
 	return v
 }
 
-// geocodeRoute resolves both addresses, writing an error on failure.
-func (s *Server) geocodeRoute(ctx context.Context, w http.ResponseWriter, startAddr, endAddr string) (start, end geo.Point, ok bool) {
+// geocodeRoute resolves the addresses whose coordinates are not given,
+// writing an error on failure.
+func (s *Server) geocodeRoute(ctx context.Context, w http.ResponseWriter, startAddr, endAddr string, startAt, endAt *geo.Point) (start, end geo.Point, ok bool) {
 	for _, a := range []struct {
 		name, addr string
-		p          *geo.Point
-	}{{"start_address", startAddr, &start}, {"end_address", endAddr, &end}} {
+		at, p      *geo.Point
+	}{{"start_address", startAddr, startAt, &start}, {"end_address", endAddr, endAt, &end}} {
+		if a.at != nil {
+			*a.p = *a.at
+			continue
+		}
 		p, err := s.cfg.Geocoder.Geocode(ctx, a.addr)
 		switch {
 		case errors.Is(err, geo.ErrNotFound):
@@ -140,7 +145,18 @@ func (s *Server) quoteRide(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "start_address and end_address are required")
 		return
 	}
-	start, end, ok := s.geocodeRoute(r.Context(), w, startAddr, endAddr)
+	var at [2]*geo.Point
+	for i, name := range []string{"start", "end"} {
+		if v := r.URL.Query().Get(name); v != "" {
+			p, err := geo.ParsePoint(v)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, name+": "+err.Error())
+				return
+			}
+			at[i] = &p
+		}
+	}
+	start, end, ok := s.geocodeRoute(r.Context(), w, startAddr, endAddr, at[0], at[1])
 	if !ok {
 		return
 	}
@@ -163,6 +179,10 @@ type createRideRequest struct {
 	// CosignerKey is the rider's optional "acct_shared_xvk". Without it the
 	// server cosigns in the rider's place.
 	CosignerKey string `json:"cosigner_key,omitempty"`
+	// Start and End, when given, are used instead of geocoding the
+	// addresses, which then only label the ride.
+	Start *geo.Point `json:"start,omitempty"`
+	End   *geo.Point `json:"end,omitempty"`
 }
 
 func (s *Server) createRide(w http.ResponseWriter, r *http.Request) {
@@ -174,6 +194,10 @@ func (s *Server) createRide(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "start_address, end_address and pickup_time (RFC 3339) are required")
 		return
 	}
+	if (req.Start != nil && !req.Start.Valid()) || (req.End != nil && !req.End.Valid()) {
+		writeError(w, http.StatusBadRequest, "start and end must be valid lat/lng coordinates")
+		return
+	}
 	req.CosignerKey = strings.TrimSpace(req.CosignerKey)
 	if req.CosignerKey != "" {
 		if err := s.cfg.Cosigner.CheckCosignerKey(req.CosignerKey); err != nil {
@@ -181,7 +205,7 @@ func (s *Server) createRide(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	start, end, ok := s.geocodeRoute(r.Context(), w, req.StartAddress, req.EndAddress)
+	start, end, ok := s.geocodeRoute(r.Context(), w, req.StartAddress, req.EndAddress, req.Start, req.End)
 	if !ok {
 		return
 	}

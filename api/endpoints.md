@@ -103,6 +103,8 @@ Query parameters:
 | --------------- | -------- | --------------- |
 | `start_address` | yes      | pickup address  |
 | `end_address`   | yes      | drop-off address |
+| `start`         | no       | `lat,lng` of the pickup; skips geocoding `start_address` |
+| `end`           | no       | `lat,lng` of the drop-off; skips geocoding `end_address` |
 
 ```json
 {
@@ -121,15 +123,16 @@ none are registered.
 | Status | When                                   |
 | ------ | -------------------------------------- |
 | 200    | quoted                                 |
-| 400    | an address parameter is missing        |
+| 400    | an address parameter is missing, or bad `start`/`end` |
 | 422    | an address could not be found          |
 | 502    | the geocoder failed                    |
 
 ### `GET /search` — look up an address
 
 Lists addresses matching free text, best first, so the rider can check which
-place an address resolves to. `GET /ride` and `POST /ride` use the first match
-for the address they are given.
+place an address resolves to. `GET /ride` and `POST /ride` geocode an address
+to its first match unless they are given its coordinates, so pass the `lat`
+and `lng` of the result the rider picked.
 
 Query parameters:
 
@@ -158,9 +161,14 @@ Query parameters:
   "start_address": "Berlin Hbf",
   "end_address": "Alexanderplatz",
   "pickup_time": "2026-11-01T09:00:00Z",
-  "cosigner_key": "acct_shared_xvk1…"
+  "cosigner_key": "acct_shared_xvk1…",
+  "start": { "lat": 52.5251, "lng": 13.3694 },
+  "end": { "lat": 52.5219, "lng": 13.4132 }
 }
 ```
+
+`start` and `end` are optional. Each one given is used instead of geocoding
+its address, which then only labels the ride.
 
 `cosigner_key` is optional. Without it the server takes the rider's place in
 the ride address and the ride is `custodial`.
@@ -168,7 +176,7 @@ the ride address and the ride is `custodial`.
 | Status | When                                                         |
 | ------ | ------------------------------------------------------------ |
 | 201    | created; body is the ride (`requested`)                      |
-| 400    | missing fields, bad JSON, or an invalid or server-owned `cosigner_key` |
+| 400    | missing fields, bad JSON, invalid `start`/`end`, or an invalid or server-owned `cosigner_key` |
 | 422    | an address could not be found                                |
 | 502    | the geocoder failed                                          |
 
