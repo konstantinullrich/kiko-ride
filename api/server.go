@@ -198,5 +198,5 @@ func LogRequests(log *slog.Logger, next http.Handler) http.Handler {
 }
 
 func (s *Server) getCurrency(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"currency": "cardano"})
+	writeJSON(w, http.StatusOK, map[string]string{"currency": []string{"cardano", "bsv"}})
 }
