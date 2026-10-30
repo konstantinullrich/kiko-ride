@@ -237,28 +237,6 @@ func (s *Signer) Sign(p *Proposal) ([]common.VkeyWitness, error) {
 	return witnesses, nil
 }
 
-// EncodeWitness serializes a witness as hex CBOR for transport.
-func EncodeWitness(w common.VkeyWitness) (string, error) {
-	raw, err := cbor.Encode(&w)
-	if err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(raw), nil
-}
-
-// DecodeWitness parses a witness produced by EncodeWitness.
-func DecodeWitness(s string) (common.VkeyWitness, error) {
-	raw, err := hex.DecodeString(s)
-	if err != nil {
-		return common.VkeyWitness{}, fmt.Errorf("invalid witness hex: %w", err)
-	}
-	var w common.VkeyWitness
-	if _, err := cbor.DecodeExact(raw, &w); err != nil {
-		return common.VkeyWitness{}, fmt.Errorf("invalid witness: %w", err)
-	}
-	return w, nil
-}
-
 // Assemble verifies the witnesses against the proposal and returns the
 // signed transaction CBOR. Every attached script must reach its threshold of
 // valid signatures; only the signatures needed are included, so a third
@@ -300,13 +278,4 @@ func (w *Wallet) Assemble(p *Proposal, witnesses ...common.VkeyWitness) ([]byte,
 		}
 	}
 	return b.GetTxCbor()
-}
-
-// Submit assembles the signed transaction and submits it.
-func (w *Wallet) Submit(ctx context.Context, chain backend.ChainContext, p *Proposal, witnesses ...common.VkeyWitness) (common.Blake2b256, error) {
-	signed, err := w.Assemble(p, witnesses...)
-	if err != nil {
-		return common.Blake2b256{}, err
-	}
-	return backend.SubmitTxContext(ctx, chain, signed)
 }

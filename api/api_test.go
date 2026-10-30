@@ -136,15 +136,15 @@ func newSigner(t *testing.T) *multisig.Signer {
 	return s
 }
 
-// signRequest signs req as the driver with key at time at, if key belongs
-// to a test signer.
-func signRequest(req *http.Request, key string, body []byte, at time.Time) {
+// signRequest signs req's method with target and body as the driver with
+// key at time at, if key belongs to a test signer.
+func signRequest(req *http.Request, key, target string, body []byte, at time.Time) {
 	signer, ok := signers.Load(normalizeKey(key))
 	if !ok {
 		return
 	}
 	ts := at.Unix()
-	sig := signer.(*multisig.Signer).SignMessage(DriverMessage(ts, req.Method, req.RequestURI, body))
+	sig := signer.(*multisig.Signer).SignMessage(DriverMessage(ts, req.Method, target, body))
 	req.Header.Set(HeaderDriverTimestamp, strconv.FormatInt(ts, 10))
 	req.Header.Set(HeaderDriverSignature, hex.EncodeToString(sig))
 }
@@ -212,7 +212,7 @@ func (e *env) do(t *testing.T, method, path, driverKey string, body any) *httpte
 	} else if m, ok := body.(map[string]any); ok {
 		signer, _ = m["public_key"].(string)
 	}
-	signRequest(req, signer, raw, time.Now())
+	signRequest(req, signer, path, raw, time.Now())
 	rec := httptest.NewRecorder()
 	e.h.ServeHTTP(rec, req)
 	return rec
@@ -785,32 +785,29 @@ func TestDriverSignature(t *testing.T) {
 	accept := "/api/v1/driver/drive/" + ride.ID
 	body := []byte(`{"eta_minutes":4}`)
 
-	send := func(path, key string, signedBody []byte, signedPath string, at time.Time) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	// send posts body to accept, signed by key over signedPath and signedBody.
+	send := func(key string, signedBody []byte, signedPath string, at time.Time) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, accept, bytes.NewReader(body))
 		req.Header.Set(HeaderDriverKey, d.PublicKey)
-		signed := httptest.NewRequest(http.MethodPost, signedPath, nil)
-		signRequest(signed, key, signedBody, at)
-		for _, h := range []string{HeaderDriverTimestamp, HeaderDriverSignature} {
-			req.Header.Set(h, signed.Header.Get(h))
-		}
+		signRequest(req, key, signedPath, signedBody, at)
 		rec := httptest.NewRecorder()
 		e.h.ServeHTTP(rec, req)
 		return rec
 	}
 	now := time.Now()
 	for name, rec := range map[string]*httptest.ResponseRecorder{
-		"unsigned":      send(accept, "", body, accept, now),
-		"stale":         send(accept, d.PublicKey, body, accept, now.Add(-MaxSignatureAge-time.Second)),
-		"future":        send(accept, d.PublicKey, body, accept, now.Add(MaxSignatureAge+time.Second)),
-		"other driver":  send(accept, other.PublicKey, body, accept, now),
-		"tampered body": send(accept, d.PublicKey, []byte(`{"eta_minutes":5}`), accept, now),
-		"other ride":    send(accept, d.PublicKey, body, "/api/v1/driver/drive/other", now),
+		"unsigned":      send("", body, accept, now),
+		"stale":         send(d.PublicKey, body, accept, now.Add(-MaxSignatureAge-time.Second)),
+		"future":        send(d.PublicKey, body, accept, now.Add(MaxSignatureAge+time.Second)),
+		"other driver":  send(other.PublicKey, body, accept, now),
+		"tampered body": send(d.PublicKey, []byte(`{"eta_minutes":5}`), accept, now),
+		"other ride":    send(d.PublicKey, body, "/api/v1/driver/drive/other", now),
 	} {
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("%s: expected 401, got %d: %s", name, rec.Code, rec.Body.String())
 		}
 	}
-	expect(t, send(accept, d.PublicKey, body, accept, now.Add(-MaxSignatureAge+time.Second)), http.StatusOK)
+	expect(t, send(d.PublicKey, body, accept, now.Add(-MaxSignatureAge+time.Second)), http.StatusOK)
 
 	// Registration must be signed by the key it registers, so nobody else
 	// can replace a driver's profile.
@@ -822,7 +819,7 @@ func TestDriverSignature(t *testing.T) {
 	}
 	raw, _ := json.Marshal(profile)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/driver", bytes.NewReader(raw))
-	signRequest(req, other.PublicKey, raw, now)
+	signRequest(req, other.PublicKey, "/api/v1/driver", raw, now)
 	rec := httptest.NewRecorder()
 	e.h.ServeHTTP(rec, req)
 	expect(t, rec, http.StatusUnauthorized)

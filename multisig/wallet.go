@@ -113,19 +113,6 @@ func (w *Wallet) Address(index uint32) (Address, error) {
 	return Address{Index: index, Address: addr, Script: script, KeyHashes: hashes}, nil
 }
 
-// Addresses derives count consecutive addresses starting at from.
-func (w *Wallet) Addresses(from, count uint32) ([]Address, error) {
-	addrs := make([]Address, 0, count)
-	for i := range count {
-		addr, err := w.Address(from + i)
-		if err != nil {
-			return nil, err
-		}
-		addrs = append(addrs, addr)
-	}
-	return addrs, nil
-}
-
 // FundedAddress is a derived address and the UTxOs currently sitting at it.
 type FundedAddress struct {
 	Address
@@ -179,23 +166,4 @@ func (w *Wallet) funded(ctx context.Context, chain backend.ChainContext, indexes
 		}
 	}
 	return funded, nil
-}
-
-// NextUnused returns the lowest index at or after from whose address holds no
-// UTxOs, for handing out fresh deposit addresses.
-func (w *Wallet) NextUnused(ctx context.Context, chain backend.ChainContext, from uint32) (Address, error) {
-	for index := from; index <= maxIndex; index++ {
-		addr, err := w.Address(index)
-		if err != nil {
-			return Address{}, err
-		}
-		utxos, err := backend.UtxosContext(ctx, chain, addr.Address)
-		if err != nil {
-			return Address{}, fmt.Errorf("load UTxOs for index %d: %w", index, err)
-		}
-		if len(utxos) == 0 {
-			return addr, nil
-		}
-	}
-	return Address{}, errors.New("no unused index left")
 }

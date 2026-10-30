@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
-	"regexp"
 	"strconv"
 	"sync"
 
@@ -24,18 +23,13 @@ import (
 // use; Cardano blocks are slow, so keep it generous.
 const DefaultMaxTimeoutSeconds = 600
 
-var nativeAssetRe = regexp.MustCompile(`^[0-9a-f]{56}\.[0-9a-f]{0,64}$`)
-
 // Price is what a request costs and where the money goes.
 type Price struct {
 	// PayTo is the bech32 address that receives the payment.
 	PayTo string
-	// Amount is in atomic units of Asset (lovelace for ADA). A pure-lovelace
-	// payment output must clear the ledger's min-UTxO, roughly 1 ADA.
+	// Amount is in lovelace. A pure-lovelace payment output must clear the
+	// ledger's min-UTxO, roughly 1 ADA.
 	Amount uint64
-	// Asset is Lovelace (the default when empty) or a native token as
-	// "policyIdHex.assetNameHex".
-	Asset string
 	// Description and MimeType describe the resource to the client.
 	Description string
 	MimeType    string
@@ -59,10 +53,6 @@ type Config struct {
 	Facilitator Facilitator
 	// MaxTimeoutSeconds defaults to DefaultMaxTimeoutSeconds.
 	MaxTimeoutSeconds int
-	// Confirmations sets extra.confirmationPolicy.l1Confirmations (-1..20).
-	// Nil omits it, which the scheme treats as 1. It must lie within the
-	// range the facilitator advertises in /supported.
-	Confirmations *int
 	// BaseURL, e.g. "https://api.example.com", is used for resource.url.
 	// When empty it is derived from the request.
 	BaseURL string
@@ -89,9 +79,6 @@ func New(cfg Config) (*Middleware, error) {
 	}
 	if cfg.MaxTimeoutSeconds == 0 {
 		cfg.MaxTimeoutSeconds = DefaultMaxTimeoutSeconds
-	}
-	if c := cfg.Confirmations; c != nil && (*c < -1 || *c > 20) {
-		return nil, fmt.Errorf("confirmations %d out of range -1..20", *c)
 	}
 	log := cfg.Logger
 	if log == nil {
@@ -241,25 +228,14 @@ func (m *Middleware) requirements(p Price) (PaymentRequirements, error) {
 	if addr.NetworkId() != wantNet {
 		return PaymentRequirements{}, fmt.Errorf("payTo %s is not a %s address", p.PayTo, m.cfg.Network)
 	}
-	asset := p.Asset
-	if asset == "" {
-		asset = Lovelace
-	}
-	if asset != Lovelace && !nativeAssetRe.MatchString(asset) {
-		return PaymentRequirements{}, fmt.Errorf("asset %q must be %q or policyIdHex.assetNameHex", asset, Lovelace)
-	}
-	req := PaymentRequirements{
+	return PaymentRequirements{
 		Scheme:            "exact",
 		Network:           m.cfg.Network,
 		Amount:            strconv.FormatUint(p.Amount, 10),
-		Asset:             asset,
+		Asset:             Lovelace,
 		PayTo:             p.PayTo,
 		MaxTimeoutSeconds: m.cfg.MaxTimeoutSeconds,
-	}
-	if c := m.cfg.Confirmations; c != nil {
-		req.Extra = map[string]any{"confirmationPolicy": map[string]any{"l1Confirmations": *c}}
-	}
-	return req, nil
+	}, nil
 }
 
 func (m *Middleware) resourceURL(r *http.Request) string {

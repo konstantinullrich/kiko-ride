@@ -172,21 +172,7 @@ func TestPaymentAnyTwoOfThree(t *testing.T) {
 			t.Fatalf("pair %v: assembled with one signature", pair)
 		}
 
-		// Witnesses survive hex transport.
-		var decoded []common.VkeyWitness
-		for _, wit := range wits {
-			enc, err := EncodeWitness(wit)
-			if err != nil {
-				t.Fatal(err)
-			}
-			dec, err := DecodeWitness(enc)
-			if err != nil {
-				t.Fatal(err)
-			}
-			decoded = append(decoded, dec)
-		}
-
-		signed, err := w.Assemble(p, decoded...)
+		signed, err := w.Assemble(p, wits...)
 		if err != nil {
 			t.Fatalf("pair %v: %v", pair, err)
 		}

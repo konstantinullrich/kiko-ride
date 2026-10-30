@@ -25,7 +25,8 @@
 //	p, _ := w.BuildPayment(ctx, chain, multisig.Payment{To: dest, Lovelace: 5_000_000})
 //	witA, _ := signerA.Sign(p) // on A's device
 //	witC, _ := signerC.Sign(p) // on C's device
-//	txID, _ := w.Submit(ctx, chain, p, append(witA, witC...)...)
+//	signed, _ := w.Assemble(p, append(witA, witC...)...)
+//	txID, _ := backend.SubmitTxContext(ctx, chain, signed)
 //
 // # Kiko server cosigner
 //
@@ -38,6 +39,5 @@
 // every server key a proposal's scripts contain, and Payment.From spends a
 // ride's address index directly instead of discovering from index 0.
 //
-// Proposals and witnesses are plain bytes so they can be passed between
-// parties as hex or JSON.
+// A Proposal is plain hex CBOR so it can be passed between parties as JSON.
 package multisig
