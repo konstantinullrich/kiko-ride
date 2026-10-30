@@ -34,11 +34,10 @@ docker run -p 8080:8080 --env-file .env -v kiko-data:/data kiko-backend
 | -------------------------- | -------- | ----------------------------------------------------------------- |
 | `KIKO_SERVER_MNEMONIC`     | yes      | BIP-39 mnemonic of the server's cosigner keys. Keep it secret.    |
 | `MAPBOX_ACCESS_TOKEN`      | yes      | Mapbox token for geocoding                                        |
-| `OGMIOS_URL`               | one of   | Ogmios endpoint for submitting payouts (`KUPO_URL` optional)      |
-| `BLOCKFROST_PROJECT_ID`    | one of   | Blockfrost project id, used when `OGMIOS_URL` is unset            |
 | `CARDANO_NETWORK`          | no       | `preprod` (default), `preview` or `mainnet`                       |
 | `X402_FACILITATOR_URL`     | no       | Required outside preprod; defaults to the Cardano Foundation's    |
-| `BLOCKFROST_URL`           | no       | Overrides the Blockfrost base URL for the network                 |
+| `KOIOS_URL`                | no       | Koios base URL; defaults to the public instance for the network   |
+| `KOIOS_API_TOKEN`          | no       | Koios bearer token; the public tier is used when unset            |
 | `KIKO_LISTEN_ADDR`         | no       | Default `:8080`                                                   |
 | `KIKO_DB_PATH`             | no       | SQLite database file, default `kiko.db` (`/data/kiko.db` in Docker) |
 | `MAPBOX_PERMANENT`         | no       | `true` for permanent geocoding                                    |
