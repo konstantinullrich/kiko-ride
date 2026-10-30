@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -57,6 +58,33 @@ func TestMapbox(t *testing.T) {
 	}
 	if _, err := m.Geocode(context.Background(), "a;b"); err == nil {
 		t.Fatal("expected error for ';'")
+	}
+}
+
+func TestMapboxSearch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("limit") != "2" {
+			t.Errorf("unexpected request %s", r.URL)
+		}
+		w.Write([]byte(`{"type":"FeatureCollection","features":[
+			{"geometry":{"coordinates":[13.4132,52.5219]},"properties":{"name":"Alexanderplatz","full_address":"Alexanderplatz, 10178 Berlin, Germany"}},
+			{"geometry":{"coordinates":[13.7075,51.6314]},"properties":{"name":"Alexanderplatz"}}]}`))
+	}))
+	defer srv.Close()
+
+	m := &Mapbox{Token: "tok", BaseURL: srv.URL}
+	got, err := m.Search(context.Background(), "Alexanderplatz", 2)
+	want := []Place{
+		{Address: "Alexanderplatz, 10178 Berlin, Germany", Point: Point{Lat: 52.5219, Lng: 13.4132}},
+		{Address: "Alexanderplatz", Point: Point{Lat: 51.6314, Lng: 13.7075}},
+	}
+	if err != nil || !slices.Equal(got, want) {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	for _, limit := range []int{0, MaxSearchResults + 1} {
+		if _, err := m.Search(context.Background(), "Alexanderplatz", limit); err == nil {
+			t.Errorf("limit %d: expected error", limit)
+		}
 	}
 }
 

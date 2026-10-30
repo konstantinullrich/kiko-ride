@@ -22,6 +22,9 @@ Content-Type: application/json
   }
 }
 
+### Search an address: what does start_address resolve to?
+GET {{host}}/api/v1/search?q={{start_address_query}}&limit=5
+
 ### 2. Quote the ride (fare range over registered drivers)
 GET {{host}}/api/v1/ride?start_address={{start_address_query}}&end_address={{end_address_query}}
 

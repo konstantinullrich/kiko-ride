@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -91,6 +92,32 @@ func (s *Server) geocodeRoute(ctx context.Context, w http.ResponseWriter, startA
 		*a.p = p
 	}
 	return start, end, true
+}
+
+// search lists addresses matching q, best first, so the rider can pick the
+// one meant before requesting a ride.
+func (s *Server) search(w http.ResponseWriter, r *http.Request) {
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if query == "" {
+		writeError(w, http.StatusBadRequest, "q is required")
+		return
+	}
+	limit := DefaultSearchResults
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > geo.MaxSearchResults {
+			writeError(w, http.StatusBadRequest, "limit must be 1-"+strconv.Itoa(geo.MaxSearchResults))
+			return
+		}
+		limit = n
+	}
+	places, err := s.cfg.Geocoder.Search(r.Context(), query, limit)
+	if err != nil {
+		s.log.Error("search", "err", err)
+		writeError(w, http.StatusBadGateway, "could not search addresses")
+		return
+	}
+	writeJSON(w, http.StatusOK, places)
 }
 
 type fareRange struct {

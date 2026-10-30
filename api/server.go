@@ -38,6 +38,9 @@ const MinFareLovelace = 1_000_000
 // DefaultSearchRangeKm is used when GET .../available has no range.
 const DefaultSearchRangeKm = 5
 
+// DefaultSearchResults is used when GET /api/v1/search has no limit.
+const DefaultSearchResults = 5
+
 // HeaderDriverKey carries the calling driver's public key.
 const HeaderDriverKey = "X-Driver-Key"
 
@@ -87,6 +90,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/ride", s.quoteRide)
 	mux.HandleFunc("POST /api/v1/ride", s.createRide)
 	mux.HandleFunc("GET /api/v1/ride/{id}", s.getRide)
+	mux.HandleFunc("GET /api/v1/search", s.search)
 	mux.HandleFunc("GET /api/v1/currency", s.getCurrency)
 	return mux
 }

@@ -20,9 +20,22 @@ type Point struct {
 	Lng float64 `json:"lng"`
 }
 
-// Geocoder resolves a free-form address to a coordinate.
+// Place is a geocoded address.
+type Place struct {
+	Address string `json:"address"`
+	Point
+}
+
+// MaxSearchResults is the most places a Geocoder's Search returns.
+const MaxSearchResults = 10
+
+// Geocoder resolves free-form addresses to coordinates.
 type Geocoder interface {
+	// Geocode returns the best match for address, or ErrNotFound.
 	Geocode(ctx context.Context, address string) (Point, error)
+	// Search returns up to limit matches for query, best first; none is not
+	// an error.
+	Search(ctx context.Context, query string, limit int) ([]Place, error)
 }
 
 // ParsePoint parses "lat,lng".

@@ -44,6 +44,17 @@ func (fakeGeocoder) Geocode(_ context.Context, address string) (geo.Point, error
 	return p, nil
 }
 
+// Search matches the known places containing query.
+func (fakeGeocoder) Search(_ context.Context, query string, limit int) ([]geo.Place, error) {
+	out := []geo.Place{}
+	for addr, p := range places {
+		if strings.Contains(addr, query) && len(out) < limit {
+			out = append(out, geo.Place{Address: addr, Point: p})
+		}
+	}
+	return out, nil
+}
+
 type fakeFacilitator struct {
 	settle  x402.SettleResponse
 	settled int
@@ -420,6 +431,24 @@ func TestQuoteAndUnknownAddress(t *testing.T) {
 		t.Fatalf("unexpected quote: %+v", q)
 	}
 	expect(t, e.do(t, http.MethodGet, "/api/v1/ride?start_address=Nowhere&end_address=Alexanderplatz", "", nil), http.StatusUnprocessableEntity)
+}
+
+func TestSearch(t *testing.T) {
+	e := newEnv(t)
+	rec := e.do(t, http.MethodGet, "/api/v1/search?q=Alexander", "", nil)
+	expect(t, rec, http.StatusOK)
+	got := decode[[]geo.Place](t, rec)
+	if len(got) != 1 || got[0].Address != "Alexanderplatz" || got[0].Point != places["Alexanderplatz"] {
+		t.Fatalf("unexpected places: %+v", got)
+	}
+	rec = e.do(t, http.MethodGet, "/api/v1/search?q=Nowhere", "", nil)
+	expect(t, rec, http.StatusOK)
+	if got := decode[[]geo.Place](t, rec); len(got) != 0 {
+		t.Fatalf("expected no places, got %+v", got)
+	}
+	for _, path := range []string{"/api/v1/search", "/api/v1/search?q=Berlin&limit=0", "/api/v1/search?q=Berlin&limit=11", "/api/v1/search?q=Berlin&limit=x"} {
+		expect(t, e.do(t, http.MethodGet, path, "", nil), http.StatusBadRequest)
+	}
 }
 
 func TestFareFloor(t *testing.T) {

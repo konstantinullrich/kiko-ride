@@ -125,6 +125,32 @@ none are registered.
 | 422    | an address could not be found          |
 | 502    | the geocoder failed                    |
 
+### `GET /search` — look up an address
+
+Lists addresses matching free text, best first, so the rider can check which
+place an address resolves to. `GET /ride` and `POST /ride` use the first match
+for the address they are given.
+
+Query parameters:
+
+| Name    | Required | Description                     |
+| ------- | -------- | ------------------------------- |
+| `q`     | yes      | free-form address               |
+| `limit` | no       | number of results, 1-10, default 5 |
+
+```json
+[
+  { "address": "Alexanderplatz, 03238 Finsterwalde, Germany", "lat": 51.631357, "lng": 13.707521 },
+  { "address": "Alexanderplatz, 10178 Berlin, Germany", "lat": 52.521666, "lng": 13.413191 }
+]
+```
+
+| Status | When                                  |
+| ------ | ------------------------------------- |
+| 200    | list (possibly empty)                 |
+| 400    | `q` missing or bad `limit`            |
+| 502    | the geocoder failed                   |
+
 ### `POST /ride` — request a ride
 
 ```json
