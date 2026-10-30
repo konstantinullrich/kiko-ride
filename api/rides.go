@@ -207,10 +207,10 @@ type createRideRequest struct {
 	StartAddress string    `json:"start_address"`
 	EndAddress   string    `json:"end_address"`
 	PickupTime   time.Time `json:"pickup_time"`
-	// CosignerKey is the rider's optional cosigner key, "acct_shared_xvk" for
-	// Cardano or "xpub"/"tpub" for BSV, and only drivers of that chain can
-	// take the ride. Without it the server cosigns in the rider's place and
-	// drivers of any chain can.
+	// CosignerKey is the rider's optional public key for this ride, a
+	// Cardano "addr_shared_vk" or a BSV compressed public key in hex, and
+	// only drivers of that chain can take the ride. Without it the server
+	// cosigns in the rider's place and drivers of any chain can.
 	CosignerKey string `json:"cosigner_key,omitempty"`
 	// Start and End, when given, are used instead of geocoding the
 	// addresses, which then only label the ride.
@@ -233,7 +233,7 @@ func (s *Server) createRide(w http.ResponseWriter, r *http.Request) {
 	}
 	req.CosignerKey = strings.TrimSpace(req.CosignerKey)
 	if req.CosignerKey != "" {
-		_, key, err := s.checkCosignerKey(req.CosignerKey)
+		_, key, err := s.checkRiderKey(req.CosignerKey)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "cosigner_key: "+err.Error())
 			return

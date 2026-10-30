@@ -121,7 +121,8 @@ func TestDriverKeyPicksChain(t *testing.T) {
 	}
 
 	// A rider with a BSV key can only be taken by BSV drivers.
-	ride := e.createRideWithKey(t, newBSVSigner(t).AccountKey())
+	riderKey, _ := newBSVSigner(t).Key(0)
+	ride := e.createRideWithKey(t, riderKey)
 	avail := func(driverKey string) int {
 		return len(decode[[]availableRide](t, e.do(t, http.MethodGet, "/api/v1/driver/drive/available?location=52.52,13.37", driverKey, nil)))
 	}
@@ -129,11 +130,16 @@ func TestDriverKeyPicksChain(t *testing.T) {
 		t.Fatal("a BSV rider's ride must only be listed to BSV drivers")
 	}
 	expect(t, e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, cardano.PublicKey, map[string]any{}), http.StatusUnprocessableEntity)
+	acc := e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, bsv.PublicKey, map[string]any{})
+	expect(t, acc, http.StatusOK)
+	if v := decode[rideView](t, acc); v.Custodial || !strings.Contains(v.PayTo, riderKey) {
+		t.Fatalf("ride script %s does not hold the rider's key %s", v.PayTo, riderKey)
+	}
 	expect(t, e.do(t, http.MethodGet, "/api/v1/driver/drive/available?location=52.52,13.37", "", nil), http.StatusUnauthorized)
 
 	// A custodial ride is open to both.
 	e.createRide(t)
-	if avail(cardano.PublicKey) != 1 || avail(bsv.PublicKey) != 2 {
+	if avail(cardano.PublicKey) != 1 || avail(bsv.PublicKey) != 1 {
 		t.Fatal("a custodial ride must be listed to drivers of every chain")
 	}
 }

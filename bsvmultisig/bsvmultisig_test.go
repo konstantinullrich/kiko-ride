@@ -207,9 +207,27 @@ func TestServerCustodialSign(t *testing.T) {
 	}
 	verifyScripts(t, tx)
 
-	shared, isCustodial, err := server.RideWallet(driver.AccountKey(), rider.AccountKey())
+	if _, _, err := server.RideWallet(driver.AccountKey(), rider.AccountKey()); err == nil {
+		t.Fatal("accepted an account key as the rider's key")
+	}
+	riderKey, _ := rider.Key(9)
+	shared, isCustodial, err := server.RideWallet(driver.AccountKey(), riderKey)
 	if err != nil || isCustodial {
 		t.Fatalf("expected a non-custodial wallet: %v", err)
+	}
+	if addr, _ := shared.Address(2); !strings.Contains(addr.String(), riderKey) {
+		t.Fatal("ride script does not hold the rider's key")
+	}
+	// The rider cannot use a key the server or driver holds at the index.
+	for _, signer := range []*Signer{server.backup, server.primary, driver} {
+		key, _ := signer.Key(2)
+		w, _, err := server.RideWallet(driver.AccountKey(), key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Address(2); err == nil {
+			t.Fatal("accepted a server or driver key as the rider's key at its index")
+		}
 	}
 	chain.fund(t, shared, 2, 20_000)
 	p, err = shared.BuildPayment(ctx, chain, Payment{To: payee(t), Satoshis: 10_000, From: []uint32{2}, ChangeIndex: 2})
@@ -280,7 +298,8 @@ func TestServerCosign(t *testing.T) {
 		t.Fatal(err)
 	}
 	driver, rider := newSigner(t), newSigner(t)
-	for _, riderKey := range []string{"", rider.AccountKey()} {
+	perRide, _ := rider.Key(9)
+	for _, riderKey := range []string{"", perRide} {
 		w, _, err := server.RideWallet(driver.AccountKey(), riderKey)
 		if err != nil {
 			t.Fatal(err)
@@ -298,8 +317,8 @@ func TestServerCosign(t *testing.T) {
 			t.Fatalf("expected ErrMissingSignature, got %v", err)
 		}
 		signed := partiallySigned(t, p, driver)
-		if _, _, err := server.Cosign(w, 7, rider.AccountKey(), signed); err == nil {
-			t.Fatal("the rider's key must not count as the driver's signature")
+		if _, _, err := server.Cosign(w, 7, newSigner(t).AccountKey(), signed); err == nil {
+			t.Fatal("an outsider's key must not count as the driver's signature")
 		}
 		if _, _, err := server.Cosign(w, 6, driver.AccountKey(), signed); err == nil {
 			t.Fatal("expected a wrong index to be rejected")

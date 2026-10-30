@@ -516,7 +516,8 @@ func TestRideAddressCosigners(t *testing.T) {
 	rider := newSigner(t)
 
 	custodial := e.createRide(t)
-	withKey := e.createRideWithKey(t, rider.AccountKey())
+	riderKey, _ := rider.Key(5)
+	withKey := e.createRideWithKey(t, riderKey)
 	if !custodial.Custodial || withKey.Custodial {
 		t.Fatalf("custodial flags wrong: %v, %v", custodial.Custodial, withKey.Custodial)
 	}
@@ -541,7 +542,7 @@ func TestRideAddressCosigners(t *testing.T) {
 	if got.AddressIndex == nil || *got.AddressIndex != 2 {
 		t.Fatalf("ride has index %v, want 2", got.AddressIndex)
 	}
-	if want := e.rideAddress(t, d.PublicKey, rider.AccountKey(), 2); got.PayTo != want {
+	if want := e.rideAddress(t, d.PublicKey, riderKey, 2); got.PayTo != want {
 		t.Fatalf("ride pays to %s, want server+driver+rider %s", got.PayTo, want)
 	}
 }
@@ -553,17 +554,22 @@ func TestCosignerKeyValidation(t *testing.T) {
 		rec := e.do(t, http.MethodPost, "/api/v1/driver", "", map[string]any{"public_key": key, "car": car})
 		expect(t, rec, http.StatusBadRequest)
 	}
-	rec := e.do(t, http.MethodPost, "/api/v1/ride", "", map[string]string{
-		"start_address": "Berlin Hbf",
-		"end_address":   "Alexanderplatz",
-		"pickup_time":   "2026-11-01T09:00:00Z",
-		"cosigner_key":  e.cosigner.AccountKey(),
-	})
-	expect(t, rec, http.StatusBadRequest)
+	// Riders give a key for the ride, never an account key.
+	for _, key := range []string{e.cosigner.AccountKey(), newSigner(t).AccountKey(), "addr_shared_vk1qqqq"} {
+		rec := e.do(t, http.MethodPost, "/api/v1/ride", "", map[string]string{
+			"start_address": "Berlin Hbf",
+			"end_address":   "Alexanderplatz",
+			"pickup_time":   "2026-11-01T09:00:00Z",
+			"cosigner_key":  key,
+		})
+		expect(t, rec, http.StatusBadRequest)
+	}
 
-	// A driver cannot take a ride whose rider uses the driver's own key.
-	shared := newSigner(t).AccountKey()
-	d := e.registerDriverWithKey(t, shared)
+	// A driver cannot take a ride whose rider uses the driver's own key at
+	// the ride's index, the first one.
+	driver := newSigner(t)
+	d := e.registerDriverWithKey(t, driver.AccountKey())
+	shared, _ := driver.Key(1)
 	ride := e.createRideWithKey(t, shared)
 	expect(t, e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, d.PublicKey, map[string]any{}), http.StatusUnprocessableEntity)
 }
@@ -687,7 +693,7 @@ func TestDriverPayout(t *testing.T) {
 		d := e.registerDriverWithKey(t, driver.AccountKey())
 		riderKey := ""
 		if !custodial {
-			riderKey = newSigner(t).AccountKey()
+			riderKey, _ = newSigner(t).Key(3)
 		}
 		ride := e.createRideWithKey(t, riderKey)
 		acc := e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, d.PublicKey, map[string]any{"eta_minutes": 3})

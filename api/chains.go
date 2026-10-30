@@ -45,7 +45,7 @@ type BSVConfig struct {
 // errChainDisabled is returned for BSV keys when BSV is not configured.
 var errChainDisabled = errors.New("BSV is not enabled on this server")
 
-// parseKey classifies a cosigner key by its format and normalizes it:
+// parseKey classifies a driver's account key by its format and normalizes it:
 // bech32 is case insensitive, so Cardano keys are lowercased, while base58
 // BSV keys are kept as given.
 func parseKey(key string) (Chain, string, error) {
@@ -66,7 +66,40 @@ func normalizeKey(key string) string {
 	return key
 }
 
-// checkCosignerKey parses a driver's or rider's key and checks it with the
+// parseRiderKey classifies a rider's per-ride public key by its format and
+// normalizes it: a Cardano bech32 "addr_shared_vk1…"/"addr_shared_xvk1…"
+// is lowercased, as is a BSV compressed public key in hex.
+func parseRiderKey(key string) (Chain, string, error) {
+	key = strings.ToLower(strings.TrimSpace(key))
+	switch {
+	case strings.HasPrefix(key, "addr_shared_vk1"), strings.HasPrefix(key, "addr_shared_xvk1"):
+		return ChainCardano, key, nil
+	case len(key) == 66 && (strings.HasPrefix(key, "02") || strings.HasPrefix(key, "03")):
+		return ChainBSV, key, nil
+	}
+	return "", key, errors.New(`must be a public key for this ride: a Cardano "addr_shared_vk1…" or a BSV compressed public key in hex`)
+}
+
+// checkRiderKey parses a rider's per-ride key and checks it is a valid key
+// of an enabled chain.
+func (s *Server) checkRiderKey(key string) (Chain, string, error) {
+	chain, key, err := parseRiderKey(key)
+	if err != nil {
+		return "", key, err
+	}
+	switch chain {
+	case ChainCardano:
+		_, err = multisig.ParseKey(key)
+	case ChainBSV:
+		if s.cfg.BSV == nil {
+			return "", key, errChainDisabled
+		}
+		_, err = bsvmultisig.ParseKey(key)
+	}
+	return chain, key, err
+}
+
+// checkCosignerKey parses a driver's account key and checks it with the
 // chain's server cosigner.
 func (s *Server) checkCosignerKey(key string) (Chain, string, error) {
 	chain, key, err := parseKey(key)

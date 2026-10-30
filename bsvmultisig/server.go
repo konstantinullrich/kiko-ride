@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	bip32 "github.com/bsv-blockchain/go-sdk/compat/bip32"
 	"github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/transaction"
 )
@@ -73,22 +74,25 @@ func (s *Server) CheckCosignerKey(key string) error {
 }
 
 // RideWallet returns the 2-of-3 wallet of the server, the driver and the
-// rider. If riderKey is empty the server's backup key takes the rider's
-// place and custodial is true.
+// rider. riderKey is the rider's own compressed public key for the ride, in
+// hex, used at every index as is. If riderKey is empty the server's backup
+// key takes the rider's place and custodial is true.
 func (s *Server) RideWallet(driverKey, riderKey string) (w *Wallet, custodial bool, err error) {
 	if err := s.CheckCosignerKey(driverKey); err != nil {
 		return nil, false, fmt.Errorf("driver key: %w", err)
 	}
 	if riderKey == "" {
-		riderKey, custodial = s.backup.AccountKey(), true
-	} else if err := s.CheckCosignerKey(riderKey); err != nil {
+		w, err = NewWallet(s.network, s.primary.AccountKey(), driverKey, s.backup.AccountKey())
+		return w, true, err
+	}
+	w, err = NewKeyWallet(s.network, s.primary.AccountKey(), driverKey, riderKey)
+	if err != nil {
 		return nil, false, fmt.Errorf("rider key: %w", err)
 	}
-	w, err = NewWallet(s.network, s.primary.AccountKey(), driverKey, riderKey)
-	if err != nil {
-		return nil, false, err
-	}
-	return w, custodial, nil
+	// A rider key equal to the backup key would hand the server a second key
+	// on the ride.
+	w.exclude = []*bip32.ExtendedKey{s.backup.account}
+	return w, false, nil
 }
 
 // Sign returns the server's witnesses for a proposal from a ride wallet: the

@@ -38,15 +38,17 @@ can spend:
 | ------ | ------------------------------------------------------------------ |
 | Server | Kiko's server key, account `0'` of the server mnemonic             |
 | Driver | The driver's `public_key`, any account                             |
-| Rider  | The rider's `cosigner_key` (any account), or the server's fallback key, account `1'`, if none is given |
+| Rider  | The rider's `cosigner_key`, a public key for this ride used as is; or, if none is given, the server's fallback key, account `1'` |
 
-All three are account keys on the driver's chain, and each party's key for a
-ride is derived from them at the ride's `address_index` (role 0):
+The server and driver keys are account keys on the driver's chain, derived
+for each ride at its `address_index` (role 0). The rider's key is not
+derived: the rider checks it appears in `pay_to` before paying, and needs no
+index to sign with it later.
 
-| Chain   | Account keys                                  | Ride key                               | Locked by                                       |
-| ------- | --------------------------------------------- | -------------------------------------- | ----------------------------------------------- |
-| Cardano | CIP-1854 `acct_shared_xvk1…`                  | `m/1854'/1815'/account'/0/address_index` | native script `atLeast 2`, at its script address (`addr1w…`/`addr_test1w…`) |
-| BSV     | BIP-32 `xpub…`/`tpub…` at `m/48'/236'/account'` | `m/48'/236'/account'/0/address_index`    | bare `OP_2 <keys> OP_3 OP_CHECKMULTISIG` output, keys sorted (BIP-67); it has no address |
+| Chain   | Server and driver account keys                  | Their ride key                           | Rider key                     | Locked by |
+| ------- | ----------------------------------------------- | ---------------------------------------- | ----------------------------- | --------- |
+| Cardano | CIP-1854 `acct_shared_xvk1…`                    | `m/1854'/1815'/account'/0/address_index` | `addr_shared_vk1…` (or `addr_shared_xvk1…`) | native script `atLeast 2`, at its script address (`addr1w…`/`addr_test1w…`) |
+| BSV     | BIP-32 `xpub…`/`tpub…` at `m/48'/236'/account'` | `m/48'/236'/account'/0/address_index`    | compressed public key, 33 bytes hex (`02…`/`03…`) | bare `OP_2 <keys> OP_3 OP_CHECKMULTISIG` output, keys sorted (BIP-67); it has no address |
 
 If the rider gives no key the ride is `custodial` and the server holds two of
 the three keys.
@@ -185,7 +187,7 @@ Query parameters:
   "start_address": "Berlin Hbf",
   "end_address": "Alexanderplatz",
   "pickup_time": "2026-11-01T09:00:00Z",
-  "cosigner_key": "acct_shared_xvk1…",
+  "cosigner_key": "addr_shared_vk1…",
   "start": { "lat": 52.5251, "lng": 13.3694 },
   "end": { "lat": 52.5219, "lng": 13.4132 }
 }
@@ -194,15 +196,17 @@ Query parameters:
 `start` and `end` are optional. Each one given is used instead of geocoding
 its address, which then only labels the ride.
 
-`cosigner_key` is optional. A Cardano key ties the ride to Cardano drivers, a
-BSV key to BSV drivers. Without it the server takes the rider's place in the
-ride address, the ride is `custodial`, and drivers on either chain can take
-it.
+`cosigner_key` is optional: the rider's public key for this ride, a Cardano
+`addr_shared_vk1…` or a BSV compressed public key in hex. Account keys are
+refused. Use a fresh key for every ride; a reused key links the rides on
+chain. A Cardano key ties the ride to Cardano drivers, a BSV key to BSV
+drivers. Without it the server takes the rider's place in the ride address,
+the ride is `custodial`, and drivers on either chain can take it.
 
 | Status | When                                                         |
 | ------ | ------------------------------------------------------------ |
 | 201    | created; body is the ride (`requested`)                      |
-| 400    | missing fields, bad JSON, invalid `start`/`end`, an invalid or server-owned `cosigner_key`, or a BSV key while BSV is off |
+| 400    | missing fields, bad JSON, invalid `start`/`end`, a `cosigner_key` that is not a valid per-ride key (account keys included), or a BSV key while BSV is off |
 | 422    | an address could not be found                                |
 | 502    | the geocoder failed                                          |
 
@@ -426,7 +430,7 @@ address. Returns the ride (`accepted`) with the driver-only fields
 | 401    | missing or unknown `X-Driver-Key`, or bad signature |
 | 404    | unknown ride                                                 |
 | 409    | ride already taken                                           |
-| 422    | the rider's key is on another chain, or the ride address cannot be formed (rider uses the driver's key) |
+| 422    | the rider's key is on another chain, or the ride address cannot be formed (the rider's key is the driver's or the server's at the ride's index) |
 
 ### `GET /driver/drive/{ride_id}` — view an accepted ride
 

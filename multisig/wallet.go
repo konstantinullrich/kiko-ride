@@ -35,32 +35,60 @@ const Cosigners = 3
 const Threshold = 2
 
 // Wallet is a watch-only 2-of-3 multisig wallet built from the cosigners'
-// account public keys. It derives addresses and builds unsigned transactions;
-// it cannot sign.
+// account public keys, or from two account keys and one fixed key. It
+// derives addresses and builds unsigned transactions; it cannot sign.
 type Wallet struct {
-	network  Network
-	accounts [Cosigners]bip32.XPub
+	network Network
+	// accounts are sorted, so the order they are passed in does not matter.
+	accounts []bip32.XPub
+	// key, when set, is the third cosigner's key at every index.
+	key []byte
+	// exclude holds accounts whose key at an index must not be key there.
+	exclude []bip32.XPub
 }
 
 // NewWallet creates a wallet from the three cosigners' "acct_shared_xvk"
 // keys. The keys are sorted, so every party derives the same addresses
 // regardless of the order they are passed in.
 func NewWallet(network Network, accountKeyA, accountKeyB, accountKeyC string) (*Wallet, error) {
-	var accounts [Cosigners]bip32.XPub
-	for i, key := range []string{accountKeyA, accountKeyB, accountKeyC} {
+	accounts, err := parseAccounts(accountKeyA, accountKeyB, accountKeyC)
+	if err != nil {
+		return nil, err
+	}
+	return &Wallet{network: network, accounts: accounts}, nil
+}
+
+// NewKeyWallet creates a wallet from two cosigners' "acct_shared_xvk" keys
+// and a third cosigner's fixed "addr_shared_vk" key, which locks every
+// index alongside the two derived keys.
+func NewKeyWallet(network Network, accountKeyA, accountKeyB, key string) (*Wallet, error) {
+	accounts, err := parseAccounts(accountKeyA, accountKeyB)
+	if err != nil {
+		return nil, err
+	}
+	pub, err := ParseKey(key)
+	if err != nil {
+		return nil, err
+	}
+	return &Wallet{network: network, accounts: accounts, key: pub}, nil
+}
+
+func parseAccounts(keys ...string) ([]bip32.XPub, error) {
+	accounts := make([]bip32.XPub, len(keys))
+	for i, key := range keys {
 		xpub, err := ParseAccountKey(key)
 		if err != nil {
 			return nil, fmt.Errorf("cosigner %c: %w", 'A'+i, err)
 		}
 		accounts[i] = xpub
 	}
-	slices.SortFunc(accounts[:], func(a, b bip32.XPub) int { return bytes.Compare(a, b) })
-	for i := 1; i < Cosigners; i++ {
+	slices.SortFunc(accounts, func(a, b bip32.XPub) int { return bytes.Compare(a, b) })
+	for i := 1; i < len(accounts); i++ {
 		if bytes.Equal(accounts[i-1], accounts[i]) {
 			return nil, errors.New("two cosigners use the same account key")
 		}
 	}
-	return &Wallet{network: network, accounts: accounts}, nil
+	return accounts, nil
 }
 
 // Address is one derived multisig address together with the script that
@@ -83,17 +111,31 @@ func (w *Wallet) Address(index uint32) (Address, error) {
 		return Address{}, fmt.Errorf("index %d out of range", index)
 	}
 	var hashes [Cosigners]common.Blake2b224
-	sigs := make([]common.NativeScript, 0, len(w.accounts))
 	for i, account := range w.accounts {
 		hash, err := paymentKeyHash(account, index)
 		if err != nil {
 			return Address{}, err
 		}
+		hashes[i] = hash
+	}
+	if w.key != nil {
+		hash := common.Blake2b224Hash(w.key)
+		if slices.Contains(hashes[:len(w.accounts)], hash) {
+			return Address{}, fmt.Errorf("fixed key is another cosigner's key at index %d", index)
+		}
+		for _, account := range w.exclude {
+			if own, err := paymentKeyHash(account, index); err != nil || own == hash {
+				return Address{}, fmt.Errorf("fixed key is an excluded key at index %d", index)
+			}
+		}
+		hashes[Cosigners-1] = hash
+	}
+	sigs := make([]common.NativeScript, 0, Cosigners)
+	for _, hash := range hashes {
 		sig, err := apollo.NewNativeScriptPubkey(hash)
 		if err != nil {
 			return Address{}, err
 		}
-		hashes[i] = hash
 		sigs = append(sigs, sig)
 	}
 	script, err := apollo.NewNativeScriptNofK(Threshold, sigs)

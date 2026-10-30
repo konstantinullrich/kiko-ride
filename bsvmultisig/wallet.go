@@ -65,27 +65,55 @@ type Chain interface {
 // transactions; it cannot sign.
 type Wallet struct {
 	network  Network
-	accounts [Cosigners]*bip32.ExtendedKey
+	accounts []*bip32.ExtendedKey
+	// key, when set, is the third cosigner's key at every index.
+	key *ec.PublicKey
+	// exclude holds accounts whose key at an index must not be key there.
+	exclude []*bip32.ExtendedKey
 }
 
 // NewWallet creates a wallet from the three cosigners' account keys, in any
 // order.
 func NewWallet(network Network, accountKeyA, accountKeyB, accountKeyC string) (*Wallet, error) {
-	var accounts [Cosigners]*bip32.ExtendedKey
-	for i, key := range []string{accountKeyA, accountKeyB, accountKeyC} {
+	accounts, err := parseAccounts(network, accountKeyA, accountKeyB, accountKeyC)
+	if err != nil {
+		return nil, err
+	}
+	return &Wallet{network: network, accounts: accounts}, nil
+}
+
+// NewKeyWallet creates a wallet from two cosigners' account keys and a
+// third cosigner's fixed public key (compressed, hex), which locks every
+// index alongside the two derived keys.
+func NewKeyWallet(network Network, accountKeyA, accountKeyB, key string) (*Wallet, error) {
+	accounts, err := parseAccounts(network, accountKeyA, accountKeyB)
+	if err != nil {
+		return nil, err
+	}
+	pub, err := ParseKey(key)
+	if err != nil {
+		return nil, err
+	}
+	return &Wallet{network: network, accounts: accounts, key: pub}, nil
+}
+
+func parseAccounts(network Network, keys ...string) ([]*bip32.ExtendedKey, error) {
+	accounts := make([]*bip32.ExtendedKey, len(keys))
+	for i, key := range keys {
 		xpub, err := ParseAccountKey(network, key)
 		if err != nil {
 			return nil, fmt.Errorf("cosigner %c: %w", 'A'+i, err)
 		}
 		accounts[i] = xpub
 	}
-	slices.SortFunc(accounts[:], func(a, b *bip32.ExtendedKey) int { return bytes.Compare([]byte(a.String()), []byte(b.String())) })
-	for i := 1; i < Cosigners; i++ {
-		if accounts[i-1].String() == accounts[i].String() {
-			return nil, errors.New("two cosigners use the same account key")
+	for i, a := range accounts {
+		for _, b := range accounts[i+1:] {
+			if a.String() == b.String() {
+				return nil, errors.New("two cosigners use the same account key")
+			}
 		}
 	}
-	return &Wallet{network: network, accounts: accounts}, nil
+	return accounts, nil
 }
 
 // Address is one derived multisig locking script with its keys, in script
@@ -118,6 +146,18 @@ func (w *Wallet) Address(index uint32) (Address, error) {
 			return Address{}, err
 		}
 		keys[i] = pub
+	}
+	if w.key != nil {
+		same := func(k *ec.PublicKey) bool { return k != nil && bytes.Equal(k.Compressed(), w.key.Compressed()) }
+		if slices.ContainsFunc(keys[:len(w.accounts)], same) {
+			return Address{}, fmt.Errorf("fixed key is another cosigner's key at index %d", index)
+		}
+		for _, account := range w.exclude {
+			if own, err := paymentPubKey(account, index); err != nil || same(own) {
+				return Address{}, fmt.Errorf("fixed key is an excluded key at index %d", index)
+			}
+		}
+		keys[Cosigners-1] = w.key
 	}
 	slices.SortFunc(keys[:], func(a, b *ec.PublicKey) int { return bytes.Compare(a.Compressed(), b.Compressed()) })
 	s := &script.Script{}

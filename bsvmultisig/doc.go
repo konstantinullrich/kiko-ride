@@ -39,8 +39,9 @@
 //
 // # Kiko server cosigner
 //
-// Server mirrors multisig.Server: account 0 cosigns every ride wallet and
-// account 1 stands in for a rider who brings no key. Server.Cosign adds the
+// Server mirrors multisig.Server: account 0 cosigns every ride wallet, the
+// rider's compressed public key for the ride is used as is (NewKeyWallet),
+// and account 1 stands in for a rider who brings no key. Server.Cosign adds the
 // server's signature to a transaction the counterparty has already signed.
 // Unlike Cardano, a BSV transaction id covers the unlocking scripts, so
 // cosigning changes the id; Cosign returns the final one.

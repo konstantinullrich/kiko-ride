@@ -69,7 +69,7 @@ func rideChain(r Ride) Chain {
 	if r.RiderKey == "" {
 		return ""
 	}
-	chain, _, _ := parseKey(r.RiderKey)
+	chain, _, _ := parseRiderKey(r.RiderKey)
 	return chain
 }
 

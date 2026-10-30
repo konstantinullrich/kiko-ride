@@ -48,7 +48,7 @@ func (s *Server) MCPHandler() http.Handler {
 	}, s.mcpQuote)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "request_ride",
-		Description: "Request a ride. Returns the ride in status requested; keep its id to poll it with get_ride. A cosigner_key ties the ride to its chain's drivers. Without it the ride is custodial: the server holds two of the three keys of the ride's payment address, and drivers on any chain can take it.",
+		Description: "Request a ride. Returns the ride in status requested; keep its id to poll it with get_ride. A cosigner_key, a fresh public key for this ride, ties the ride to its chain's drivers, and the ride's payTo will contain it: check that before paying. Without it the ride is custodial: the server holds two of the three keys of the ride's payment address, and drivers on any chain can take it.",
 	}, s.mcpRequestRide)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "get_ride",
@@ -105,7 +105,7 @@ type requestRideInput struct {
 	StartAddress string     `json:"start_address" jsonschema:"pickup address"`
 	EndAddress   string     `json:"end_address" jsonschema:"drop-off address"`
 	PickupTime   string     `json:"pickup_time" jsonschema:"pickup time, RFC 3339"`
-	CosignerKey  string     `json:"cosigner_key,omitempty" jsonschema:"the rider's account public key that cosigns the ride address: Cardano acct_shared_xvk1... or BSV xpub.../tpub..."`
+	CosignerKey  string     `json:"cosigner_key,omitempty" jsonschema:"the rider's public key for this ride, which cosigns the ride address: Cardano addr_shared_vk1... or a BSV compressed public key in hex. Not an account key; use a fresh key per ride"`
 	Start        *geo.Point `json:"start,omitempty" jsonschema:"coordinates of the pickup; skips geocoding start_address"`
 	End          *geo.Point `json:"end,omitempty" jsonschema:"coordinates of the drop-off; skips geocoding end_address"`
 }

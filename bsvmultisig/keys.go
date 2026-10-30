@@ -2,6 +2,7 @@ package bsvmultisig
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -40,6 +41,19 @@ func ParseAccountKey(network Network, s string) (*bip32.ExtendedKey, error) {
 		return nil, fmt.Errorf("account key has depth %d, expected %d (m/%d'/%d'/account')", key.Depth(), accountDepth, purpose, coinType)
 	}
 	return key, nil
+}
+
+// ParseKey decodes a compressed public key in hex.
+func ParseKey(s string) (*ec.PublicKey, error) {
+	raw, err := hex.DecodeString(s)
+	if err != nil || len(raw) != 33 {
+		return nil, errors.New("key must be a compressed public key: 33 bytes in hex")
+	}
+	pub, err := ec.ParsePubKey(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid key: %w", err)
+	}
+	return pub, nil
 }
 
 // paymentPubKey derives the public key at role 0, index i of an account.
@@ -93,6 +107,16 @@ func (s *Signer) AccountKey() string {
 		panic(err)
 	}
 	return pub.String()
+}
+
+// Key returns the signer's compressed public key at role 0, index i in hex,
+// for use as a fixed key in NewKeyWallet.
+func (s *Signer) Key(index uint32) (string, error) {
+	key, err := s.paymentKey(index)
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(key.PubKey().Compressed()), nil
 }
 
 // paymentKey derives the signing key at role 0, index i.

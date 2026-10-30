@@ -11,9 +11,13 @@ import (
 	"github.com/btcsuite/btcd/btcutil/bech32"
 )
 
-// accountKeyPrefix is the CIP-5 bech32 prefix for a CIP-1854 extended
-// account public key.
-const accountKeyPrefix = "acct_shared_xvk"
+// CIP-5 bech32 prefixes for CIP-1854 public keys: the extended account
+// key, and a role-0 key with and without its chain code.
+const (
+	accountKeyPrefix  = "acct_shared_xvk"
+	keyPrefix         = "addr_shared_vk"
+	extendedKeyPrefix = "addr_shared_xvk"
+)
 
 // rolePayment is the CIP-1854 role for payment keys.
 const rolePayment = 0
@@ -38,6 +42,36 @@ func ParseAccountKey(s string) (bip32.XPub, error) {
 		return nil, fmt.Errorf("invalid account key length %d, expected 64", len(raw))
 	}
 	return bip32.XPub(raw), nil
+}
+
+// ParseKey decodes a bech32 "addr_shared_vk" public key, or an
+// "addr_shared_xvk" one whose chain code it drops, into its 32 bytes.
+func ParseKey(s string) ([]byte, error) {
+	hrp, data, err := bech32.DecodeNoLimit(s)
+	if err != nil {
+		return nil, fmt.Errorf("invalid key: %w", err)
+	}
+	raw, err := bech32.ConvertBits(data, 5, 8, false)
+	if err != nil {
+		return nil, fmt.Errorf("invalid key: %w", err)
+	}
+	switch {
+	case hrp == keyPrefix && len(raw) == 32, hrp == extendedKeyPrefix && len(raw) == 64:
+		return raw[:32], nil
+	case hrp == keyPrefix, hrp == extendedKeyPrefix:
+		return nil, fmt.Errorf("invalid %s length %d", hrp, len(raw))
+	}
+	return nil, fmt.Errorf("invalid key prefix %q, expected %q", hrp, keyPrefix)
+}
+
+// Key returns the signer's "addr_shared_vk" public key at role 0, index i,
+// for use as a fixed key in NewKeyWallet.
+func (s *Signer) Key(index uint32) (string, error) {
+	key, err := s.paymentKey(index)
+	if err != nil {
+		return "", err
+	}
+	return bech32.EncodeFromBase256(keyPrefix, key.PublicKey())
 }
 
 // EncodeAccountKey encodes an account public key as bech32 "acct_shared_xvk".
