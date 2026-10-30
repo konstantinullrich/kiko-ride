@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -11,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
@@ -222,30 +220,6 @@ func TestBSVRideLifecycle(t *testing.T) {
 	for i, in := range sent.Inputs {
 		if err := interpreter.NewEngine().Execute(interpreter.WithTx(sent, i, in.SourceTxOutput()), interpreter.WithForkID(), interpreter.WithAfterGenesis()); err != nil {
 			t.Fatalf("payout input %d does not validate: %v", i, err)
-		}
-	}
-}
-
-func TestBSVDriverSignature(t *testing.T) {
-	e := newEnv(t)
-	d, other := newBSVSigner(t), newBSVSigner(t)
-	raw, _ := json.Marshal(map[string]any{
-		"public_key": d.AccountKey(),
-		"base_fee":   1000,
-		"fee_per_km": 100,
-		"car":        map[string]any{"brand": "VW", "model": "ID.3", "color": "white", "license_plate_number": "B", "year": 2021},
-	})
-	for name, key := range map[string]string{"other key": other.AccountKey(), "own key": d.AccountKey()} {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/driver", bytes.NewReader(raw))
-		signRequest(req, key, "/api/v1/driver", raw, time.Now())
-		rec := httptest.NewRecorder()
-		e.h.ServeHTTP(rec, req)
-		want := http.StatusUnauthorized
-		if key == d.AccountKey() {
-			want = http.StatusCreated
-		}
-		if rec.Code != want {
-			t.Errorf("%s: expected %d, got %d: %s", name, want, rec.Code, rec.Body.String())
 		}
 	}
 }

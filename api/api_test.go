@@ -808,9 +808,22 @@ func TestDriverPayout(t *testing.T) {
 }
 
 func TestDriverSignature(t *testing.T) {
+	for _, chain := range []Chain{ChainCardano, ChainBSV} {
+		t.Run(string(chain), func(t *testing.T) { testDriverSignature(t, chain) })
+	}
+}
+
+// testDriverSignature refuses requests a driver of chain did not sign for
+// exactly this method, path, body and moment.
+func testDriverSignature(t *testing.T, chain Chain) {
 	e := newEnv(t)
-	d := e.registerDriver(t)
-	other := e.registerDriver(t)
+	register := func() string {
+		if chain == ChainBSV {
+			return e.registerBSVDriver(t, newBSVSigner(t).AccountKey()).PublicKey
+		}
+		return e.registerDriver(t).PublicKey
+	}
+	d, other := register(), register()
 	ride := e.createRide(t)
 	accept := "/api/v1/driver/drive/" + ride.ID
 	body := []byte(`{"eta_minutes":4}`)
@@ -818,7 +831,7 @@ func TestDriverSignature(t *testing.T) {
 	// send posts body to accept, signed by key over signedPath and signedBody.
 	send := func(key string, signedBody []byte, signedPath string, at time.Time) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, accept, bytes.NewReader(body))
-		req.Header.Set(HeaderDriverKey, d.PublicKey)
+		req.Header.Set(HeaderDriverKey, d)
 		signRequest(req, key, signedPath, signedBody, at)
 		rec := httptest.NewRecorder()
 		e.h.ServeHTTP(rec, req)
@@ -827,29 +840,29 @@ func TestDriverSignature(t *testing.T) {
 	now := time.Now()
 	for name, rec := range map[string]*httptest.ResponseRecorder{
 		"unsigned":      send("", body, accept, now),
-		"stale":         send(d.PublicKey, body, accept, now.Add(-MaxSignatureAge-time.Second)),
-		"future":        send(d.PublicKey, body, accept, now.Add(MaxSignatureAge+time.Second)),
-		"other driver":  send(other.PublicKey, body, accept, now),
-		"tampered body": send(d.PublicKey, []byte(`{"eta_minutes":5}`), accept, now),
-		"other ride":    send(d.PublicKey, body, "/api/v1/driver/drive/other", now),
+		"stale":         send(d, body, accept, now.Add(-MaxSignatureAge-time.Second)),
+		"future":        send(d, body, accept, now.Add(MaxSignatureAge+time.Second)),
+		"other driver":  send(other, body, accept, now),
+		"tampered body": send(d, []byte(`{"eta_minutes":5}`), accept, now),
+		"other ride":    send(d, body, "/api/v1/driver/drive/other", now),
 	} {
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("%s: expected 401, got %d: %s", name, rec.Code, rec.Body.String())
 		}
 	}
-	expect(t, send(d.PublicKey, body, accept, now.Add(-MaxSignatureAge+time.Second)), http.StatusOK)
+	expect(t, send(d, body, accept, now.Add(-MaxSignatureAge+time.Second)), http.StatusOK)
 
 	// Registration must be signed by the key it registers, so nobody else
 	// can replace a driver's profile.
 	profile := map[string]any{
-		"public_key": d.PublicKey,
+		"public_key": d,
 		"base_fee":   1,
 		"fee_per_km": 1,
 		"car":        map[string]any{"brand": "VW", "model": "ID.3", "color": "white", "license_plate_number": "B", "year": 2021},
 	}
 	raw, _ := json.Marshal(profile)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/driver", bytes.NewReader(raw))
-	signRequest(req, other.PublicKey, "/api/v1/driver", raw, now)
+	signRequest(req, other, "/api/v1/driver", raw, now)
 	rec := httptest.NewRecorder()
 	e.h.ServeHTTP(rec, req)
 	expect(t, rec, http.StatusUnauthorized)
