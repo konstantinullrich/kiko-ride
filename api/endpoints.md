@@ -36,9 +36,9 @@ can spend:
 
 | Key    | Source                                                             |
 | ------ | ------------------------------------------------------------------ |
-| Server | Kiko's server key                                                  |
-| Driver | The driver's `public_key`                                          |
-| Rider  | The rider's `cosigner_key`, or a second server key if none is given |
+| Server | Kiko's server key, account `0'` of the server mnemonic             |
+| Driver | The driver's `public_key`, any account                             |
+| Rider  | The rider's `cosigner_key` (any account), or the server's fallback key, account `1'`, if none is given |
 
 All three are account keys on the driver's chain, and each party's key for a
 ride is derived from them at the ride's `address_index` (role 0):
