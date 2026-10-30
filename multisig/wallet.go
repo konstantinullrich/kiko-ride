@@ -162,6 +162,25 @@ func (w *Wallet) Discover(ctx context.Context, chain backend.ChainContext, gap u
 	return funded, nil
 }
 
+// funded loads the UTxOs at the given indexes, skipping empty addresses.
+func (w *Wallet) funded(ctx context.Context, chain backend.ChainContext, indexes []uint32) ([]FundedAddress, error) {
+	var funded []FundedAddress
+	for _, index := range indexes {
+		addr, err := w.Address(index)
+		if err != nil {
+			return nil, err
+		}
+		utxos, err := backend.UtxosContext(ctx, chain, addr.Address)
+		if err != nil {
+			return nil, fmt.Errorf("load UTxOs for index %d: %w", index, err)
+		}
+		if len(utxos) > 0 {
+			funded = append(funded, FundedAddress{Address: addr, Utxos: utxos})
+		}
+	}
+	return funded, nil
+}
+
 // NextUnused returns the lowest index at or after from whose address holds no
 // UTxOs, for handing out fresh deposit addresses.
 func (w *Wallet) NextUnused(ctx context.Context, chain backend.ChainContext, from uint32) (Address, error) {

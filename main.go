@@ -23,8 +23,8 @@ const cfPreprodFacilitator = "https://x402.preprod.dev.ecosyseng.cf-deployments.
 //	KIKO_LISTEN_ADDR           default ":8080"
 //	CARDANO_NETWORK            mainnet | preprod (default) | preview
 //	X402_FACILITATOR_URL       defaults to the Cardano Foundation facilitator on preprod
-//	KIKO_COSIGNER_A/B/C        acct_shared_xvk keys of Kiko's 2-of-3 wallet
-//	KIKO_FIRST_ADDRESS_INDEX   wallet index for the first ride (default 0)
+//	KIKO_SERVER_MNEMONIC       BIP-39 mnemonic of Kiko's server cosigner keys
+//	KIKO_FIRST_ADDRESS_INDEX   address index for the first ride (default 0)
 //	MAPBOX_ACCESS_TOKEN        Mapbox token for geocoding
 //	MAPBOX_PERMANENT           "true" for permanent geocoding (needed to store results)
 func main() {
@@ -59,10 +59,9 @@ func run() error {
 		return err
 	}
 
-	wallet, err := multisig.NewWallet(walletNetwork,
-		os.Getenv("KIKO_COSIGNER_A"), os.Getenv("KIKO_COSIGNER_B"), os.Getenv("KIKO_COSIGNER_C"))
+	cosigner, err := multisig.NewServer(walletNetwork, os.Getenv("KIKO_SERVER_MNEMONIC"))
 	if err != nil {
-		return fmt.Errorf("KIKO_COSIGNER_A/B/C: %w", err)
+		return fmt.Errorf("KIKO_SERVER_MNEMONIC: %w", err)
 	}
 	firstIndex, err := strconv.ParseUint(envOr("KIKO_FIRST_ADDRESS_INDEX", "0"), 10, 32)
 	if err != nil {
@@ -81,7 +80,7 @@ func run() error {
 
 	server, err := api.New(api.Config{
 		Network:           network,
-		Wallet:            wallet,
+		Cosigner:          cosigner,
 		FirstAddressIndex: uint32(firstIndex),
 		Geocoder:          geocoder,
 		Payments:          payments,
@@ -98,7 +97,8 @@ func run() error {
 		// Paid requests wait for settlement, which can take minutes.
 		WriteTimeout: 4 * time.Minute,
 	}
-	slog.Info("listening", "addr", addr, "network", network, "facilitator", facilitatorURL)
+	slog.Info("listening", "addr", addr, "network", network, "facilitator", facilitatorURL,
+		"cosigner", cosigner.AccountKey())
 	return srv.ListenAndServe()
 }
 

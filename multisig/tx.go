@@ -15,6 +15,10 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 )
 
+// ErrNotCosigner is returned by Sign when the signer's key is not part of
+// the proposal's scripts.
+var ErrNotCosigner = errors.New("not a cosigner of this transaction's scripts")
+
 // vkeyWitnessSize is the CBOR size of one vkey witness (array header, 32-byte
 // key and 64-byte signature with their headers) plus a few bytes of slack.
 const vkeyWitnessSize = 110
@@ -25,6 +29,9 @@ type Payment struct {
 	Lovelace int64
 	// ChangeIndex is the wallet address index that receives the change.
 	ChangeIndex uint32
+	// From limits the inputs to these address indexes. When empty, funds are
+	// found with Discover, which only sees indexes within the gap limit.
+	From []uint32
 }
 
 // Proposal is an unsigned transaction waiting for both cosigners' witnesses.
@@ -63,7 +70,13 @@ func (w *Wallet) BuildPayment(ctx context.Context, chain backend.ChainContext, p
 	if p.Lovelace <= 0 {
 		return nil, errors.New("payment amount must be positive")
 	}
-	funded, err := w.Discover(ctx, chain, 0)
+	var funded []FundedAddress
+	var err error
+	if len(p.From) > 0 {
+		funded, err = w.funded(ctx, chain, p.From)
+	} else {
+		funded, err = w.Discover(ctx, chain, 0)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +200,7 @@ func (s *Signer) Sign(p *Proposal) ([]common.VkeyWitness, error) {
 		}
 		pub := key.PublicKey()
 		if !slices.Contains(scriptKeys, common.Blake2b224Hash(pub)) {
-			return nil, fmt.Errorf("key at index %d is not a cosigner of this transaction's scripts", index)
+			return nil, fmt.Errorf("key at index %d: %w", index, ErrNotCosigner)
 		}
 		witnesses = append(witnesses, common.VkeyWitness{
 			Vkey:      pub,

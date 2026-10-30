@@ -27,6 +27,15 @@
 //	witC, _ := signerC.Sign(p) // on C's device
 //	txID, _ := w.Submit(ctx, chain, p, append(witA, witC...)...)
 //
+// # Kiko server cosigner
+//
+// Server is the backend's own cosigner. RideWallet combines its key with the
+// driver's and the rider's account keys; a rider without a key is replaced by
+// the server's backup key (a second account from the same mnemonic), giving
+// the server two of the three keys. Server.Sign signs with every server key a
+// proposal's scripts contain, and Payment.From spends a ride's address index
+// directly instead of discovering from index 0.
+//
 // Proposals and witnesses are plain bytes so they can be passed between
 // parties as hex or JSON.
 package multisig

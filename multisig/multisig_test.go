@@ -3,6 +3,7 @@ package multisig
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"slices"
 	"testing"
 
@@ -283,5 +284,186 @@ func TestParseAccountKeyRejectsWrongPrefix(t *testing.T) {
 	}
 	if _, err := ParseAccountKey(xpub.String()); err == nil {
 		t.Fatal("accepted root_xvk prefix")
+	}
+}
+
+func newServer(t *testing.T) *Server {
+	t.Helper()
+	mnemonic, err := bursa.GenerateMnemonic()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(Preprod, mnemonic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// ridePayment funds the ride wallet at a high index, outside Discover's gap,
+// and proposes spending it.
+func ridePayment(t *testing.T, w *Wallet) *Proposal {
+	t.Helper()
+	const index = 500
+	fc := fixed.NewEmptyFixedChainContext()
+	addr, _ := w.Address(index)
+	addUtxo(fc, addr.Address, 10_000_000, 1)
+	dest, _ := w.Address(0)
+	p, err := w.BuildPayment(context.Background(), fc, Payment{To: dest.Address, Lovelace: 2_000_000, ChangeIndex: index, From: []uint32{index}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(p.Indexes, []uint32{index}) {
+		t.Fatalf("expected to spend index %d, got %v", index, p.Indexes)
+	}
+	return p
+}
+
+func TestServerWithRiderKey(t *testing.T) {
+	server, driver, rider := newServer(t), newSigner(t), newSigner(t)
+	w, custodial, err := server.RideWallet(driver.AccountKey(), rider.AccountKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if custodial {
+		t.Fatal("wallet with a rider key reported custodial")
+	}
+	p := ridePayment(t, w)
+
+	serverWits, err := server.Sign(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(serverWits) != 1 {
+		t.Fatalf("server should sign once, got %d witnesses", len(serverWits))
+	}
+	if _, err := w.Assemble(p, serverWits...); err == nil {
+		t.Fatal("server alone spent a non-custodial ride")
+	}
+	for _, other := range []*Signer{driver, rider} {
+		if _, err := w.Assemble(p, append(serverWits, sign(t, p, other)...)...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := w.Assemble(p, sign(t, p, driver, rider)...); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServerWithoutRiderKey(t *testing.T) {
+	server, driver := newServer(t), newSigner(t)
+	w, custodial, err := server.RideWallet(driver.AccountKey(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !custodial {
+		t.Fatal("wallet without a rider key must be custodial")
+	}
+	p := ridePayment(t, w)
+	wits, err := server.Sign(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Assemble(p, wits...); err != nil {
+		t.Fatalf("server should spend alone with its two keys: %v", err)
+	}
+	if _, err := w.Assemble(p, append(wits[:1], sign(t, p, driver)...)...); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServerRejectsOwnKeys(t *testing.T) {
+	server, driver := newServer(t), newSigner(t)
+	for _, key := range []string{server.AccountKey(), server.backup.AccountKey()} {
+		if err := server.CheckCosignerKey(key); err == nil {
+			t.Fatal("accepted a server key as cosigner key")
+		}
+		if _, _, err := server.RideWallet(driver.AccountKey(), key); err == nil {
+			t.Fatal("accepted a server key as rider key")
+		}
+		if _, _, err := server.RideWallet(key, ""); err == nil {
+			t.Fatal("accepted a server key as driver key")
+		}
+	}
+	if _, _, err := server.RideWallet(driver.AccountKey(), driver.AccountKey()); err == nil {
+		t.Fatal("accepted the same key for driver and rider")
+	}
+}
+
+// partiallySigned returns the proposal's transaction carrying the signers'
+// witnesses, as a counterparty's wallet would send it.
+func partiallySigned(t *testing.T, p *Proposal, signers ...*Signer) []byte {
+	t.Helper()
+	raw, err := hex.DecodeString(p.TxCbor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(signers) == 0 {
+		return raw
+	}
+	out, err := replaceVkeyWitnesses(raw, sign(t, p, signers...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestServerCosignsDriverPayout(t *testing.T) {
+	server, driver, rider := newServer(t), newSigner(t), newSigner(t)
+	for _, riderKey := range []string{rider.AccountKey(), ""} {
+		w, _, err := server.RideWallet(driver.AccountKey(), riderKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := ridePayment(t, w)
+		index := p.Indexes[0]
+		wantID, _ := p.TxID()
+
+		if _, _, err := server.Cosign(w, index, driver.AccountKey(), partiallySigned(t, p)); !errors.Is(err, ErrMissingSignature) {
+			t.Fatalf("cosigned an unsigned transaction: %v", err)
+		}
+		if riderKey != "" {
+			if _, _, err := server.Cosign(w, index, driver.AccountKey(), partiallySigned(t, p, rider)); !errors.Is(err, ErrMissingSignature) {
+				t.Fatalf("cosigned without the driver: %v", err)
+			}
+		}
+		if _, _, err := server.Cosign(w, index, newSigner(t).AccountKey(), partiallySigned(t, p, driver)); err == nil {
+			t.Fatal("cosigned for an outsider")
+		}
+
+		signed, txID, err := server.Cosign(w, index, driver.AccountKey(), partiallySigned(t, p, driver))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if txID != wantID {
+			t.Fatal("cosigning changed the transaction id")
+		}
+		var tx conway.ConwayTransaction
+		if _, err := cbor.DecodeExact(signed, &tx); err != nil {
+			t.Fatal(err)
+		}
+		if tx.Body.Id() != wantID {
+			t.Fatal("cosigning changed the transaction body")
+		}
+		wits := tx.WitnessSet.VkeyWitnesses.Items()
+		if len(wits) != Threshold {
+			t.Fatalf("expected %d witnesses, got %d", Threshold, len(wits))
+		}
+		addr, _ := w.Address(index)
+		have := func(h common.Blake2b224) bool {
+			return slices.ContainsFunc(wits, func(v common.VkeyWitness) bool { return common.Blake2b224Hash(v.Vkey) == h })
+		}
+		if _, ok := satisfyingKeys(addr.Script, have); !ok {
+			t.Fatal("driver and server signatures do not satisfy the ride script")
+		}
+
+		// Cosigning again does not add a second server signature.
+		again, _, err := server.Cosign(w, index, driver.AccountKey(), signed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cbor.DecodeExact(again, &tx); err != nil || len(tx.WitnessSet.VkeyWitnesses.Items()) != Threshold {
+			t.Fatalf("re-cosigning changed the witnesses: %v", err)
+		}
 	}
 }
