@@ -13,11 +13,6 @@ import (
 
 const timeFormat = time.RFC3339
 
-type rideDriver struct {
-	ID  string `json:"id"`
-	Car Car    `json:"car"`
-}
-
 type rideView struct {
 	ID           string     `json:"id"`
 	Status       RideStatus `json:"status"`
@@ -31,12 +26,13 @@ type rideView struct {
 	// holds two of the ride address's three keys.
 	Custodial bool `json:"custodial"`
 
-	FareLovelace uint64      `json:"fare_lovelace,omitempty"`
-	PayTo        string      `json:"pay_to,omitempty"`
-	EtaMinutes   *int        `json:"eta_minutes,omitempty"`
-	EtaKm        *float64    `json:"eta_km,omitempty"`
-	Driver       *rideDriver `json:"driver,omitempty"`
-	PaymentTx    string      `json:"payment_tx,omitempty"`
+	FareLovelace uint64   `json:"fare_lovelace,omitempty"`
+	PayTo        string   `json:"pay_to,omitempty"`
+	EtaMinutes   *int     `json:"eta_minutes,omitempty"`
+	EtaKm        *float64 `json:"eta_km,omitempty"`
+	// Car is the driver's car, so the rider can find it.
+	Car       *Car   `json:"car,omitempty"`
+	PaymentTx string `json:"payment_tx,omitempty"`
 
 	// Shown to the driver, who needs them to build the payout.
 	AddressIndex *uint32 `json:"address_index,omitempty"`
@@ -44,8 +40,8 @@ type rideView struct {
 	PayoutTx     string  `json:"payout_tx,omitempty"`
 }
 
-// view renders a ride. Driver details are shown to the driver, and to the
-// rider only once the ride is paid.
+// view renders a ride. The ETA and car are shown to the driver, and to the
+// rider only once the ride is paid; payout details only to the driver.
 func (s *Server) view(r Ride, forDriver bool) rideView {
 	v := rideView{
 		ID:           r.ID,
@@ -67,10 +63,10 @@ func (s *Server) view(r Ride, forDriver bool) rideView {
 	if forDriver {
 		v.AddressIndex, v.Script, v.PayoutTx = &r.AddressIndex, r.Script, r.PayoutTx
 	}
-	if forDriver || r.Status == StatusPaid {
+	if forDriver || r.Status == StatusPaid || r.Status == StatusPaidOut {
 		v.EtaMinutes, v.EtaKm = &r.EtaMinutes, &r.EtaKm
-		if d, ok := s.store.driver(r.DriverID); ok {
-			v.Driver = &rideDriver{ID: d.ID, Car: d.Car}
+		if d, ok := s.store.driver(r.DriverKey); ok {
+			v.Car = &d.Car
 		}
 	}
 	return v
@@ -176,7 +172,7 @@ func (s *Server) createRide(w http.ResponseWriter, r *http.Request) {
 }
 
 // getRide is free until a driver accepts. An accepted ride must be paid via
-// x402 once; the paid response and every later one include the driver.
+// x402 once; the paid response and every later one include the car.
 func (s *Server) getRide(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	ride, ok := s.store.ride(id)

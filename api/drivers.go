@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Salvionied/apollo/v2/backend"
 	"github.com/blinklabs-io/gouroboros/cbor"
 
 	"kiko-backend/geo"
@@ -20,7 +21,7 @@ func (s *Server) createDriver(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &d) {
 		return
 	}
-	d.PublicKey = strings.TrimSpace(d.PublicKey)
+	d.PublicKey = normalizeKey(d.PublicKey)
 	if err := s.cfg.Cosigner.CheckCosignerKey(d.PublicKey); err != nil {
 		writeError(w, http.StatusBadRequest, "public_key must be an acct_shared_xvk cosigner key: "+err.Error())
 		return
@@ -29,14 +30,26 @@ func (s *Server) createDriver(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "car brand, model, color and license_plate_number are required")
 		return
 	}
-	writeJSON(w, http.StatusCreated, s.store.addDriver(d))
+	d, err := s.store.addDriver(d)
+	if err != nil {
+		writeError(w, http.StatusConflict, "a driver with this public_key is already registered")
+		return
+	}
+	writeJSON(w, http.StatusCreated, d)
 }
 
-// currentDriver resolves the X-Driver-ID header, writing an error if unknown.
+// normalizeKey trims a bech32 key and lowercases it; bech32 is case
+// insensitive, so both spellings name the same driver.
+func normalizeKey(key string) string {
+	return strings.ToLower(strings.TrimSpace(key))
+}
+
+// currentDriver resolves the X-Driver-Key header, writing an error if
+// unknown.
 func (s *Server) currentDriver(w http.ResponseWriter, r *http.Request) (Driver, bool) {
-	d, ok := s.store.driver(r.Header.Get(HeaderDriverID))
+	d, ok := s.store.driver(normalizeKey(r.Header.Get(HeaderDriverKey)))
 	if !ok {
-		writeError(w, http.StatusUnauthorized, HeaderDriverID+" header must name a registered driver")
+		writeError(w, http.StatusUnauthorized, HeaderDriverKey+" header must carry a registered driver's public_key")
 	}
 	return d, ok
 }
@@ -149,7 +162,7 @@ func (s *Server) driverRide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ride, ok := s.store.ride(r.PathValue("ride_id"))
-	if !ok || ride.DriverID != d.ID {
+	if !ok || ride.DriverKey != d.PublicKey {
 		writeError(w, http.StatusNotFound, "ride not found")
 		return
 	}
@@ -162,14 +175,8 @@ type payoutRequest struct {
 	Transaction string `json:"transaction"`
 }
 
-type payoutResponse struct {
-	// Transaction is the hex CBOR with the server's signature added, ready
-	// for the driver to submit.
-	Transaction string `json:"transaction"`
-	TxID        string `json:"tx_id"`
-}
-
-// payout cosigns the driver's transaction spending a paid ride's address.
+// payout cosigns the driver's transaction spending a paid ride's address and
+// submits it, answering with the paid-out ride.
 func (s *Server) payout(w http.ResponseWriter, r *http.Request) {
 	d, ok := s.currentDriver(w, r)
 	if !ok {
@@ -186,12 +193,8 @@ func (s *Server) payout(w http.ResponseWriter, r *http.Request) {
 	}
 	rideID := r.PathValue("ride_id")
 	ride, ok := s.store.ride(rideID)
-	if !ok || ride.DriverID != d.ID {
+	if !ok || ride.DriverKey != d.PublicKey {
 		writeError(w, http.StatusNotFound, "ride not found")
-		return
-	}
-	if ride.Status != StatusPaid {
-		writeError(w, http.StatusConflict, "ride is not paid")
 		return
 	}
 	wallet, _, err := s.cfg.Cosigner.RideWallet(d.PublicKey, ride.RiderKey)
@@ -208,11 +211,21 @@ func (s *Server) payout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "cannot cosign: "+err.Error())
 		return
 	}
-	// Cosign only computes the signature; it is released once the payout is
+	// The signed transaction never leaves the server unless the payout is
 	// approved, so a dispute raised meanwhile wins.
-	if _, err := s.store.approvePayout(rideID, d.ID, txID.String()); err != nil {
-		writeError(w, http.StatusConflict, "ride can no longer be paid out")
+	switch err := s.store.beginPayout(rideID, d.PublicKey); {
+	case errors.Is(err, errNotFound):
+		writeError(w, http.StatusNotFound, "ride not found")
+		return
+	case err != nil:
+		writeError(w, http.StatusConflict, "ride is not paid or is already being paid out")
 		return
 	}
-	writeJSON(w, http.StatusOK, payoutResponse{Transaction: hex.EncodeToString(signed), TxID: txID.String()})
+	if _, err := backend.SubmitTxContext(r.Context(), s.cfg.Chain, signed); err != nil {
+		s.store.finishPayout(rideID, txID.String(), false)
+		s.log.Warn("submit payout", "ride", rideID, "tx", txID, "err", err)
+		writeError(w, http.StatusBadGateway, "payout rejected: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, s.view(s.store.finishPayout(rideID, txID.String(), true), true))
 }

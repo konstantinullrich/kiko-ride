@@ -6,9 +6,11 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
 	apollo "github.com/Salvionied/apollo/v2"
@@ -56,8 +58,28 @@ func (f *fakeFacilitator) Settle(context.Context, x402.PaymentPayload, x402.Paym
 	return f.settle, nil
 }
 
+// fakeChain records submitted transactions, failing while reject is set.
+type fakeChain struct {
+	*fixed.FixedChainContext
+	reject    error
+	submitted [][]byte
+}
+
+func (c *fakeChain) SubmitTx(tx []byte) (common.Blake2b256, error) {
+	if c.reject != nil {
+		return common.Blake2b256{}, c.reject
+	}
+	c.submitted = append(c.submitted, tx)
+	var decoded conway.ConwayTransaction
+	if _, err := cbor.DecodeExact(tx, &decoded); err != nil {
+		return common.Blake2b256{}, err
+	}
+	return decoded.Body.Id(), nil
+}
+
 type env struct {
 	h           http.Handler
+	chain       *fakeChain
 	cosigner    *multisig.Server
 	facilitator *fakeFacilitator
 	txB64       string // a real signed transaction
@@ -119,22 +141,23 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := New(Config{Network: x402.Preprod, Cosigner: cosigner, Geocoder: fakeGeocoder{}, Payments: payments})
+	chain := &fakeChain{FixedChainContext: fixed.NewEmptyFixedChainContext()}
+	s, err := New(Config{Network: x402.Preprod, Cosigner: cosigner, Geocoder: fakeGeocoder{}, Payments: payments, Chain: chain})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &env{h: s.Handler(), cosigner: cosigner, facilitator: f, txB64: base64.StdEncoding.EncodeToString(signed)}
+	return &env{h: s.Handler(), chain: chain, cosigner: cosigner, facilitator: f, txB64: base64.StdEncoding.EncodeToString(signed)}
 }
 
-func (e *env) do(t *testing.T, method, path, driverID string, body any) *httptest.ResponseRecorder {
+func (e *env) do(t *testing.T, method, path, driverKey string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	var buf bytes.Buffer
 	if body != nil {
 		json.NewEncoder(&buf).Encode(body)
 	}
 	req := httptest.NewRequest(method, path, &buf)
-	if driverID != "" {
-		req.Header.Set(HeaderDriverID, driverID)
+	if driverKey != "" {
+		req.Header.Set(HeaderDriverKey, driverKey)
 	}
 	rec := httptest.NewRecorder()
 	e.h.ServeHTTP(rec, req)
@@ -226,14 +249,14 @@ func TestRideLifecycle(t *testing.T) {
 		t.Fatalf("expected no rides near Munich, got %+v", got)
 	}
 
-	acc := e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, d.ID, map[string]any{"eta_minutes": 4, "eta_km": 1.2})
+	acc := e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, d.PublicKey, map[string]any{"eta_minutes": 4, "eta_km": 1.2})
 	expect(t, acc, http.StatusOK)
 	accepted := decode[rideView](t, acc)
 	wantFare := fare(d, accepted.DistanceKm)
 	if accepted.Status != StatusAccepted || accepted.FareLovelace != wantFare || accepted.PayTo == "" {
 		t.Fatalf("unexpected accepted ride: %+v", accepted)
 	}
-	expect(t, e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, d.ID, map[string]any{}), http.StatusConflict)
+	expect(t, e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, d.PublicKey, map[string]any{}), http.StatusConflict)
 
 	// Accepted: the rider must pay the fare to the ride's multisig address.
 	unpaid := e.do(t, http.MethodGet, "/api/v1/ride/"+ride.ID, "", nil)
@@ -247,21 +270,21 @@ func TestRideLifecycle(t *testing.T) {
 	paid := e.paid(t, "/api/v1/ride/"+ride.ID, req)
 	expect(t, paid, http.StatusOK)
 	view := decode[rideView](t, paid)
-	if view.Status != StatusPaid || view.Driver == nil || view.Driver.Car.LicensePlateNumber != "B-KK 402" || view.PaymentTx == "" {
+	if view.Status != StatusPaid || view.Car == nil || view.Car.LicensePlateNumber != "B-KK 402" || view.PaymentTx == "" {
 		t.Fatalf("unexpected paid view: %+v", view)
 	}
 
 	// Later polls are free.
 	again := e.do(t, http.MethodGet, "/api/v1/ride/"+ride.ID, "", nil)
 	expect(t, again, http.StatusOK)
-	if v := decode[rideView](t, again); v.Status != StatusPaid || v.Driver == nil {
+	if v := decode[rideView](t, again); v.Status != StatusPaid || v.Car == nil {
 		t.Fatalf("unexpected view after payment: %+v", v)
 	}
 	if e.facilitator.settled != 1 {
 		t.Fatalf("expected one settlement, got %d", e.facilitator.settled)
 	}
 
-	drv := e.do(t, http.MethodGet, "/api/v1/driver/drive/"+ride.ID, d.ID, nil)
+	drv := e.do(t, http.MethodGet, "/api/v1/driver/drive/"+ride.ID, d.PublicKey, nil)
 	expect(t, drv, http.StatusOK)
 	if v := decode[rideView](t, drv); v.Status != StatusPaid {
 		t.Fatalf("driver should see the ride paid: %+v", v)
@@ -273,7 +296,7 @@ func TestFailedSettlementKeepsRideUnpaid(t *testing.T) {
 	e.facilitator.settle = x402.SettleResponse{Success: false, ErrorReason: "exact_cardano_settlement_failed"}
 	d := e.registerDriver(t)
 	ride := e.createRide(t)
-	expect(t, e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, d.ID, map[string]any{"eta_minutes": 4}), http.StatusOK)
+	expect(t, e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, d.PublicKey, map[string]any{"eta_minutes": 4}), http.StatusOK)
 
 	req := decode[x402.PaymentRequired](t, e.do(t, http.MethodGet, "/api/v1/ride/"+ride.ID, "", nil)).Accepts[0]
 	expect(t, e.paid(t, "/api/v1/ride/"+ride.ID, req), http.StatusPaymentRequired)
@@ -284,7 +307,7 @@ func TestFailedSettlementKeepsRideUnpaid(t *testing.T) {
 func TestClaimRefusesSecondTransaction(t *testing.T) {
 	s := newStore(0)
 	r := s.addRide(Ride{DistanceKm: 1})
-	s.accept(r.ID, Driver{ID: "d"}, "addr", "script", 1, 1)
+	s.accept(r.ID, Driver{PublicKey: "d"}, "addr", "script", 1, 1)
 	if _, ok := s.claim(r.ID, "tx1"); !ok {
 		t.Fatal("first claim refused")
 	}
@@ -313,8 +336,13 @@ func TestDriverValidationAndAuth(t *testing.T) {
 
 	d := e.registerDriver(t)
 	other := e.registerDriver(t)
-	expect(t, e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, d.ID, map[string]any{}), http.StatusOK)
-	expect(t, e.do(t, http.MethodGet, "/api/v1/driver/drive/"+ride.ID, other.ID, nil), http.StatusNotFound)
+	dup := e.do(t, http.MethodPost, "/api/v1/driver", "", map[string]any{
+		"public_key": strings.ToUpper(d.PublicKey),
+		"car":        map[string]string{"brand": "VW", "model": "ID.3", "color": "white", "license_plate_number": "B"},
+	})
+	expect(t, dup, http.StatusConflict)
+	expect(t, e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, d.PublicKey, map[string]any{}), http.StatusOK)
+	expect(t, e.do(t, http.MethodGet, "/api/v1/driver/drive/"+ride.ID, other.PublicKey, nil), http.StatusNotFound)
 }
 
 // rideAddress is what the rider and driver can derive on their own for an
@@ -347,7 +375,7 @@ func TestRideAddressCosigners(t *testing.T) {
 	}
 
 	accept := func(id string) rideView {
-		rec := e.do(t, http.MethodPost, "/api/v1/driver/drive/"+id, d.ID, map[string]any{"eta_minutes": 3})
+		rec := e.do(t, http.MethodPost, "/api/v1/driver/drive/"+id, d.PublicKey, map[string]any{"eta_minutes": 3})
 		expect(t, rec, http.StatusOK)
 		return decode[rideView](t, rec)
 	}
@@ -379,7 +407,7 @@ func TestCosignerKeyValidation(t *testing.T) {
 	shared := newSigner(t).AccountKey()
 	d := e.registerDriverWithKey(t, shared)
 	ride := e.createRideWithKey(t, shared)
-	expect(t, e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, d.ID, map[string]any{}), http.StatusUnprocessableEntity)
+	expect(t, e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, d.PublicKey, map[string]any{}), http.StatusUnprocessableEntity)
 }
 
 func TestQuoteAndUnknownAddress(t *testing.T) {
@@ -413,7 +441,7 @@ func TestDriverPayout(t *testing.T) {
 			riderKey = newSigner(t).AccountKey()
 		}
 		ride := e.createRideWithKey(t, riderKey)
-		acc := e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, d.ID, map[string]any{"eta_minutes": 3})
+		acc := e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, d.PublicKey, map[string]any{"eta_minutes": 3})
 		expect(t, acc, http.StatusOK)
 		accepted := decode[rideView](t, acc)
 		if accepted.AddressIndex == nil || accepted.Script == "" {
@@ -462,23 +490,33 @@ func TestDriverPayout(t *testing.T) {
 		payout := "/api/v1/driver/drive/" + ride.ID + "/payout"
 		body := map[string]string{"transaction": hex.EncodeToString(partial)}
 
-		expect(t, e.do(t, http.MethodPost, payout, d.ID, body), http.StatusConflict) // not paid yet
+		expect(t, e.do(t, http.MethodPost, payout, d.PublicKey, body), http.StatusConflict) // not paid yet
 		req := decode[x402.PaymentRequired](t, e.do(t, http.MethodGet, "/api/v1/ride/"+ride.ID, "", nil)).Accepts[0]
 		expect(t, e.paid(t, "/api/v1/ride/"+ride.ID, req), http.StatusOK)
 
-		expect(t, e.do(t, http.MethodPost, payout, e.registerDriver(t).ID, body), http.StatusNotFound)
-		expect(t, e.do(t, http.MethodPost, payout, d.ID, map[string]string{"transaction": p.TxCbor}), http.StatusUnprocessableEntity)
+		expect(t, e.do(t, http.MethodPost, payout, e.registerDriver(t).PublicKey, body), http.StatusNotFound)
+		expect(t, e.do(t, http.MethodPost, payout, d.PublicKey, map[string]string{"transaction": p.TxCbor}), http.StatusUnprocessableEntity)
 
-		rec := e.do(t, http.MethodPost, payout, d.ID, body)
-		expect(t, rec, http.StatusOK)
-		res := decode[payoutResponse](t, rec)
-		wantID, _ := p.TxID()
-		if res.TxID != wantID.String() {
-			t.Fatalf("tx id %s, want %s", res.TxID, wantID)
+		// A rejected submission leaves the ride paid so the driver can retry.
+		e.chain.reject = errors.New("FeeTooSmallUTxO")
+		expect(t, e.do(t, http.MethodPost, payout, d.PublicKey, body), http.StatusBadGateway)
+		if v := decode[rideView](t, e.do(t, http.MethodGet, "/api/v1/driver/drive/"+ride.ID, d.PublicKey, nil)); v.Status != StatusPaid {
+			t.Fatalf("rejected payout changed the ride: %+v", v)
 		}
-		signed, _ := hex.DecodeString(res.Transaction)
+		e.chain.reject = nil
+
+		rec := e.do(t, http.MethodPost, payout, d.PublicKey, body)
+		expect(t, rec, http.StatusOK)
+		res := decode[rideView](t, rec)
+		wantID, _ := p.TxID()
+		if res.Status != StatusPaidOut || res.PayoutTx != wantID.String() {
+			t.Fatalf("unexpected paid-out ride: %+v", res)
+		}
+		if len(e.chain.submitted) != 1 {
+			t.Fatalf("expected one submission, got %d", len(e.chain.submitted))
+		}
 		var tx conway.ConwayTransaction
-		if _, err := cbor.DecodeExact(signed, &tx); err != nil {
+		if _, err := cbor.DecodeExact(e.chain.submitted[0], &tx); err != nil {
 			t.Fatal(err)
 		}
 		if n := len(tx.WitnessSet.VkeyWitnesses.Items()); n != multisig.Threshold {
@@ -488,9 +526,16 @@ func TestDriverPayout(t *testing.T) {
 			t.Fatalf("payout does not satisfy the ride script: %v", err)
 		}
 
-		view := decode[rideView](t, e.do(t, http.MethodGet, "/api/v1/driver/drive/"+ride.ID, d.ID, nil))
-		if view.PayoutTx != res.TxID {
-			t.Fatalf("payout not recorded: %+v", view)
+		expect(t, e.do(t, http.MethodPost, payout, d.PublicKey, body), http.StatusConflict)
+		if len(e.chain.submitted) != 1 {
+			t.Fatal("a paid-out ride was paid out again")
+		}
+		rider := decode[rideView](t, e.do(t, http.MethodGet, "/api/v1/ride/"+ride.ID, "", nil))
+		if rider.Status != StatusPaidOut || rider.Car == nil || *rider.Car != d.Car {
+			t.Fatalf("unexpected rider view: %+v", rider)
+		}
+		if raw := e.do(t, http.MethodGet, "/api/v1/ride/"+ride.ID, "", nil).Body.String(); strings.Contains(raw, d.PublicKey) {
+			t.Fatalf("rider view leaks the driver's public key: %s", raw)
 		}
 	}
 }

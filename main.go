@@ -7,7 +7,12 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/Salvionied/apollo/v2/backend"
+	"github.com/Salvionied/apollo/v2/backend/blockfrost"
+	"github.com/Salvionied/apollo/v2/backend/ogmios"
 
 	"kiko-backend/api"
 	"kiko-backend/geo"
@@ -27,6 +32,8 @@ const cfPreprodFacilitator = "https://x402.preprod.dev.ecosyseng.cf-deployments.
 //	KIKO_FIRST_ADDRESS_INDEX   address index for the first ride (default 0)
 //	MAPBOX_ACCESS_TOKEN        Mapbox token for geocoding
 //	MAPBOX_PERMANENT           "true" for permanent geocoding (needed to store results)
+//	OGMIOS_URL, KUPO_URL       chain backend for submitting payouts (KUPO_URL optional), or
+//	BLOCKFROST_PROJECT_ID      Blockfrost instead; BLOCKFROST_URL overrides its default base URL
 func main() {
 	if err := run(); err != nil {
 		slog.Error("kiko-backend", "err", err)
@@ -68,6 +75,11 @@ func run() error {
 		return fmt.Errorf("KIKO_FIRST_ADDRESS_INDEX: %w", err)
 	}
 
+	chain, err := chainContext(string(network), walletNetwork)
+	if err != nil {
+		return err
+	}
+
 	token := os.Getenv("MAPBOX_ACCESS_TOKEN")
 	if token == "" {
 		return errors.New("MAPBOX_ACCESS_TOKEN is required")
@@ -84,6 +96,7 @@ func run() error {
 		FirstAddressIndex: uint32(firstIndex),
 		Geocoder:          geocoder,
 		Payments:          payments,
+		Chain:             chain,
 	})
 	if err != nil {
 		return err
@@ -100,6 +113,30 @@ func run() error {
 	slog.Info("listening", "addr", addr, "network", network, "facilitator", facilitatorURL,
 		"cosigner", cosigner.AccountKey())
 	return srv.ListenAndServe()
+}
+
+// chainContext connects to Ogmios when OGMIOS_URL is set, otherwise to
+// Blockfrost.
+func chainContext(network string, walletNetwork multisig.Network) (backend.ChainContext, error) {
+	if url := os.Getenv("OGMIOS_URL"); url != "" {
+		chain, err := ogmios.NewOgmiosChainContext(ogmios.Config{
+			OgmiosEndpoint: url,
+			KupoEndpoint:   os.Getenv("KUPO_URL"),
+			NetworkId:      uint8(walletNetwork),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("OGMIOS_URL: %w", err)
+		}
+		return chain, nil
+	}
+	projectID := os.Getenv("BLOCKFROST_PROJECT_ID")
+	if projectID == "" {
+		return nil, errors.New("OGMIOS_URL or BLOCKFROST_PROJECT_ID is required")
+	}
+	// network is "cardano:mainnet", "cardano:preprod" or "cardano:preview".
+	name := strings.TrimPrefix(network, "cardano:")
+	url := envOr("BLOCKFROST_URL", "https://cardano-"+name+".blockfrost.io/api/v0")
+	return blockfrost.NewBlockFrostChainContext(url, uint8(walletNetwork), projectID), nil
 }
 
 func envOr(key, def string) string {

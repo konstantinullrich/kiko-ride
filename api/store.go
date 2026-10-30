@@ -25,6 +25,8 @@ const (
 	StatusAccepted RideStatus = "accepted"
 	// StatusPaid: the fare is settled on chain.
 	StatusPaid RideStatus = "paid"
+	// StatusPaidOut: the server cosigned and submitted the driver's payout.
+	StatusPaidOut RideStatus = "paid_out"
 )
 
 type Car struct {
@@ -35,10 +37,10 @@ type Car struct {
 }
 
 type Driver struct {
-	ID string `json:"id"`
-	// PublicKey is the driver's cosigner key, a CIP-1854 "acct_shared_xvk".
-	// Its key at each ride's address index cosigns that ride, and the driver
-	// is paid out by signing a spend from the ride address with it.
+	// PublicKey identifies the driver and is their cosigner key, a CIP-1854
+	// "acct_shared_xvk". Its key at each ride's address index cosigns that
+	// ride, and the driver is paid out by signing a spend from the ride
+	// address with it.
 	PublicKey string `json:"public_key"`
 	// BaseFee and FeePerKm are in lovelace.
 	BaseFee  uint64 `json:"base_fee"`
@@ -68,16 +70,18 @@ type Ride struct {
 	// the driver and the rider; the fare is paid there.
 	PayTo        string
 	Script       string
-	DriverID     string
+	DriverKey    string
 	EtaMinutes   int
 	EtaKm        float64
 	FareLovelace uint64
 
 	// PaymentTx is the settled transaction once Status is StatusPaid.
 	PaymentTx string
-	// PayoutTx is the last payout transaction the server cosigned. The
-	// driver submits it, so it may not be on chain.
+	// PayoutTx is the submitted payout once Status is StatusPaidOut.
 	PayoutTx string
+	// payingOut is set while a payout is being submitted, so two payouts
+	// cannot race.
+	payingOut bool
 	// claimTx is the transaction currently being settled for this ride, so a
 	// second, different payment is refused instead of charged twice.
 	claimTx string
@@ -101,18 +105,21 @@ func newID() string {
 	return hex.EncodeToString(b)
 }
 
-func (s *store) addDriver(d Driver) Driver {
+// addDriver registers d under its public key, which must be new.
+func (s *store) addDriver(d Driver) (Driver, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	d.ID = newID()
-	s.drivers[d.ID] = &d
-	return d
+	if _, ok := s.drivers[d.PublicKey]; ok {
+		return Driver{}, errConflict
+	}
+	s.drivers[d.PublicKey] = &d
+	return d, nil
 }
 
-func (s *store) driver(id string) (Driver, bool) {
+func (s *store) driver(publicKey string) (Driver, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	d, ok := s.drivers[id]
+	d, ok := s.drivers[publicKey]
 	if !ok {
 		return Driver{}, false
 	}
@@ -177,7 +184,7 @@ func (s *store) accept(rideID string, d Driver, payTo, script string, etaMinutes
 	r.Status = StatusAccepted
 	r.PayTo = payTo
 	r.Script = script
-	r.DriverID = d.ID
+	r.DriverKey = d.PublicKey
 	r.EtaMinutes = etaMinutes
 	r.EtaKm = etaKm
 	r.FareLovelace = fare(d, r.DistanceKm)
@@ -212,19 +219,33 @@ func (s *store) finishClaim(rideID, txID string, settled bool) {
 	}
 }
 
-// approvePayout lets the ride's driver be paid out once the fare is settled,
-// recording the transaction the server is about to cosign. This is where a
-// rider's dispute will block the payout.
-func (s *store) approvePayout(rideID, driverID, txID string) (Ride, error) {
+// beginPayout lets the ride's driver be paid out once the fare is settled
+// and no other payout is in flight. This is where a rider's dispute will
+// block the payout.
+func (s *store) beginPayout(rideID, driverKey string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r, ok := s.rides[rideID]
-	if !ok || r.DriverID != driverID {
-		return Ride{}, errNotFound
+	if !ok || r.DriverKey != driverKey {
+		return errNotFound
 	}
-	if r.Status != StatusPaid {
-		return Ride{}, errConflict
+	if r.Status != StatusPaid || r.payingOut {
+		return errConflict
 	}
-	r.PayoutTx = txID
-	return *r, nil
+	r.payingOut = true
+	return nil
+}
+
+// finishPayout marks the ride paid out when submitted, otherwise lets the
+// driver try again.
+func (s *store) finishPayout(rideID, txID string, submitted bool) Ride {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := s.rides[rideID]
+	r.payingOut = false
+	if submitted {
+		r.Status = StatusPaidOut
+		r.PayoutTx = txID
+	}
+	return *r
 }

@@ -3,7 +3,7 @@
 // Drivers register, look for requested rides near them and accept one. The
 // rider polls GET /api/v1/ride/{id}; once a driver has accepted, that call
 // requires the fare as an x402 payment to the ride's 2-of-3 multisig address,
-// and only the paid response reveals the driver and car.
+// and only the paid response reveals the car.
 //
 // The ride address is locked by the Kiko server key, the driver's public key
 // and the rider's cosigner key. A rider who brings no key gets the server's
@@ -11,10 +11,10 @@
 //
 // The driver is paid out by building a transaction that spends the ride
 // address, signing it and posting it to .../drive/{ride_id}/payout; the
-// server adds the second signature and returns it for the driver to submit.
+// server adds the second signature and submits it.
 //
-// Drivers identify themselves with the X-Driver-ID header (the id returned by
-// POST /api/v1/driver). State is kept in memory.
+// Drivers are identified by their public key, sent in the X-Driver-Key
+// header. State is kept in memory.
 package api
 
 import (
@@ -23,6 +23,8 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+
+	"github.com/Salvionied/apollo/v2/backend"
 
 	"kiko-backend/geo"
 	"kiko-backend/multisig"
@@ -36,8 +38,8 @@ const MinFareLovelace = 1_000_000
 // DefaultSearchRangeKm is used when GET .../available has no range.
 const DefaultSearchRangeKm = 5
 
-// HeaderDriverID identifies the calling driver.
-const HeaderDriverID = "X-Driver-ID"
+// HeaderDriverKey carries the calling driver's public key.
+const HeaderDriverKey = "X-Driver-Key"
 
 type Config struct {
 	Network x402.Network
@@ -51,6 +53,8 @@ type Config struct {
 	Geocoder          geo.Geocoder
 	// Payments gates GET /api/v1/ride/{id}.
 	Payments *x402.Middleware
+	// Chain submits driver payouts.
+	Chain backend.ChainContext
 	// Logger defaults to slog.Default().
 	Logger *slog.Logger
 }
@@ -62,8 +66,8 @@ type Server struct {
 }
 
 func New(cfg Config) (*Server, error) {
-	if cfg.Cosigner == nil || cfg.Geocoder == nil || cfg.Payments == nil {
-		return nil, errors.New("cosigner, geocoder and payments are required")
+	if cfg.Cosigner == nil || cfg.Geocoder == nil || cfg.Payments == nil || cfg.Chain == nil {
+		return nil, errors.New("cosigner, geocoder, payments and chain are required")
 	}
 	log := cfg.Logger
 	if log == nil {
