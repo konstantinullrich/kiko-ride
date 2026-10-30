@@ -176,22 +176,22 @@ func newID() string {
 
 const timeLayout = time.RFC3339Nano
 
-// addDriver registers d under its public key, which must be new.
-func (s *store) addDriver(d Driver) (Driver, error) {
-	res, err := s.db.Exec(`INSERT INTO drivers (public_key, base_fee, fee_per_km, car_brand, car_model,
+// putDriver registers d under its public key, or replaces the profile of
+// the driver already registered there; created reports which. Rides already
+// accepted keep the fare fixed at acceptance.
+func (s *store) putDriver(d Driver) (created bool, err error) {
+	now := time.Now().UTC().Format(timeLayout)
+	var createdAt string
+	err = s.db.QueryRow(`INSERT INTO drivers (public_key, base_fee, fee_per_km, car_brand, car_model,
 		car_color, car_license_plate_number, car_year, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (public_key) DO NOTHING`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (public_key) DO UPDATE SET base_fee = excluded.base_fee, fee_per_km = excluded.fee_per_km,
+			car_brand = excluded.car_brand, car_model = excluded.car_model, car_color = excluded.car_color,
+			car_license_plate_number = excluded.car_license_plate_number, car_year = excluded.car_year
+		RETURNING created_at`,
 		d.PublicKey, int64(d.BaseFee), int64(d.FeePerKm), d.Car.Brand, d.Car.Model,
-		d.Car.Color, d.Car.LicensePlateNumber, d.Car.Year, time.Now().UTC().Format(timeLayout))
-	if err != nil {
-		return Driver{}, err
-	}
-	if n, err := res.RowsAffected(); err != nil {
-		return Driver{}, err
-	} else if n == 0 {
-		return Driver{}, errConflict
-	}
-	return d, nil
+		d.Car.Color, d.Car.LicensePlateNumber, d.Car.Year, now).Scan(&createdAt)
+	return createdAt == now, err
 }
 
 const driverColumns = `public_key, base_fee, fee_per_km, car_brand, car_model, car_color,

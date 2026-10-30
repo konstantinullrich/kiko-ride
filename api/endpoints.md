@@ -273,7 +273,7 @@ X-Driver-Key: acct_shared_xvk1…
 and answers `401` if it does not name a registered driver. The key is a bearer
 credential: keep it private.
 
-### `POST /driver` — register
+### `POST /driver` — register or update
 
 ```json
 {
@@ -296,11 +296,15 @@ credential: keep it private.
 driver and cosigns each of their rides. The fare is
 `max(base_fee + ceil(fee_per_km × distance_km), 1000000)`.
 
+Posting again with a registered `public_key` replaces that driver's fees and
+car with the new values. Rides the driver has already accepted keep the fare
+fixed when they accepted.
+
 | Status | When                                                          |
 | ------ | ------------------------------------------------------------- |
 | 201    | registered; body echoes the driver                            |
+| 200    | already registered; profile replaced, body echoes the driver   |
 | 400    | bad JSON, invalid or server-owned `public_key`, car fields missing, or `year` out of range |
-| 409    | a driver with this `public_key` is already registered         |
 
 ### `GET /driver/drive/available` — find rides
 

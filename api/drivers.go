@@ -36,15 +36,17 @@ func (s *Server) createDriver(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "car year must be "+strconv.Itoa(MinCarYear)+"-"+strconv.Itoa(maxYear))
 		return
 	}
-	d, err := s.store.addDriver(d)
-	if errors.Is(err, errConflict) {
-		writeError(w, http.StatusConflict, "a driver with this public_key is already registered")
-		return
-	} else if err != nil {
-		s.storeError(w, "add driver", err)
+	created, err := s.store.putDriver(d)
+	if err != nil {
+		s.storeError(w, "put driver", err)
 		return
 	}
-	s.log.Info("driver registered", "driver", d.PublicKey)
+	if !created {
+		s.log.Info("driver updated", "driver", d.PublicKey, "base_fee", d.BaseFee, "fee_per_km", d.FeePerKm)
+		writeJSON(w, http.StatusOK, d)
+		return
+	}
+	s.log.Info("driver registered", "driver", d.PublicKey, "base_fee", d.BaseFee, "fee_per_km", d.FeePerKm)
 	writeJSON(w, http.StatusCreated, d)
 }
 

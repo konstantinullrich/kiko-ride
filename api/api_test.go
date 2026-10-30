@@ -379,7 +379,7 @@ func TestStorePersists(t *testing.T) {
 
 	db, s := open()
 	d := Driver{PublicKey: "d", BaseFee: 2_000_000, FeePerKm: 500_000, Car: Car{Brand: "VW", Model: "ID.3", Color: "white", LicensePlateNumber: "B", Year: 2021}}
-	if _, err := s.addDriver(d); err != nil {
+	if _, err := s.putDriver(d); err != nil {
 		t.Fatal(err)
 	}
 	pickup := time.Date(2026, 11, 1, 9, 0, 0, 0, time.FixedZone("CET", 3600))
@@ -453,11 +453,6 @@ func TestDriverValidationAndAuth(t *testing.T) {
 
 	d := e.registerDriver(t)
 	other := e.registerDriver(t)
-	dup := e.do(t, http.MethodPost, "/api/v1/driver", "", map[string]any{
-		"public_key": strings.ToUpper(d.PublicKey),
-		"car":        map[string]any{"brand": "VW", "model": "ID.3", "color": "white", "license_plate_number": "B", "year": 2021},
-	})
-	expect(t, dup, http.StatusConflict)
 	expect(t, e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, d.PublicKey, map[string]any{}), http.StatusOK)
 	expect(t, e.do(t, http.MethodGet, "/api/v1/driver/drive/"+ride.ID, other.PublicKey, nil), http.StatusNotFound)
 }
@@ -545,6 +540,43 @@ func TestQuoteAndUnknownAddress(t *testing.T) {
 		t.Fatalf("unexpected quote: %+v", q)
 	}
 	expect(t, e.do(t, http.MethodGet, "/api/v1/ride?start_address=Nowhere&end_address=Alexanderplatz", "", nil), http.StatusUnprocessableEntity)
+}
+
+func TestReregisterReplacesDriver(t *testing.T) {
+	e := newEnv(t)
+	d := e.registerDriver(t)
+	ride := e.createRide(t)
+	acc := e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, d.PublicKey, map[string]any{})
+	expect(t, acc, http.StatusOK)
+	oldFare := decode[rideView](t, acc).FareLovelace
+
+	// The key is matched case-insensitively, as everywhere else.
+	rec := e.do(t, http.MethodPost, "/api/v1/driver", "", map[string]any{
+		"public_key": strings.ToUpper(d.PublicKey),
+		"base_fee":   5_000_000,
+		"fee_per_km": 1_000_000,
+		"car":        map[string]any{"brand": "Tesla", "model": "3", "color": "red", "license_plate_number": "B-KK 403", "year": 2024},
+	})
+	expect(t, rec, http.StatusOK)
+	updated := decode[Driver](t, rec)
+	if updated.PublicKey != d.PublicKey || updated.BaseFee != 5_000_000 || updated.FeePerKm != 1_000_000 || updated.Car.Brand != "Tesla" {
+		t.Fatalf("unexpected updated driver: %+v", updated)
+	}
+
+	q := decode[quote](t, e.do(t, http.MethodGet, "/api/v1/ride?start_address=Berlin+Hbf&end_address=Alexanderplatz", "", nil))
+	if f := fare(updated, q.DistanceKm); q.FareLovelace == nil || q.FareLovelace.Min != f || q.FareLovelace.Max != f {
+		t.Fatalf("quote does not use the new fees: %+v", q)
+	}
+	got := decode[rideView](t, e.do(t, http.MethodGet, "/api/v1/driver/drive/"+ride.ID, d.PublicKey, nil))
+	if got.FareLovelace != oldFare {
+		t.Fatalf("accepted ride's fare changed from %d to %d", oldFare, got.FareLovelace)
+	}
+	next := e.createRide(t)
+	acc = e.do(t, http.MethodPost, "/api/v1/driver/drive/"+next.ID, d.PublicKey, map[string]any{})
+	expect(t, acc, http.StatusOK)
+	if f := decode[rideView](t, acc).FareLovelace; f != fare(updated, next.DistanceKm) {
+		t.Fatalf("new ride's fare %d does not use the new fees", f)
+	}
 }
 
 func TestRideCoordinates(t *testing.T) {
