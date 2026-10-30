@@ -7,7 +7,7 @@ All endpoints are under `/api/v1`, take and return JSON, and report errors as
 ```
 
 Amounts are in **lovelace** (1 ADA = 1,000,000 lovelace). Times are RFC 3339.
-Coordinates are `{ "lat": 52.52, "lng": 13.37 }`. State is kept in memory.
+Coordinates are `{ "lat": 52.52, "lng": 13.37 }`. State is kept in SQLite.
 
 ## Ride lifecycle
 

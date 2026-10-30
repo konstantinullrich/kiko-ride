@@ -14,10 +14,11 @@
 // server adds the second signature and submits it.
 //
 // Drivers are identified by their public key, sent in the X-Driver-Key
-// header. State is kept in memory.
+// header. State is kept in SQLite.
 package api
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -52,11 +53,9 @@ type Config struct {
 	// Cosigner is Kiko's server cosigner; each ride is paid to its own
 	// 2-of-3 address with the driver and rider.
 	Cosigner *multisig.Server
-	// FirstAddressIndex is the address index the first ride uses. Rides are
-	// in memory, so after a restart set it past the indexes already handed
-	// out.
-	FirstAddressIndex uint32
-	Geocoder          geo.Geocoder
+	// DB stores drivers and rides; open it with OpenDB.
+	DB       *sql.DB
+	Geocoder geo.Geocoder
 	// Payments gates GET /api/v1/ride/{id}.
 	Payments *x402.Middleware
 	// Chain submits driver payouts.
@@ -72,14 +71,18 @@ type Server struct {
 }
 
 func New(cfg Config) (*Server, error) {
-	if cfg.Cosigner == nil || cfg.Geocoder == nil || cfg.Payments == nil || cfg.Chain == nil {
-		return nil, errors.New("cosigner, geocoder, payments and chain are required")
+	if cfg.Cosigner == nil || cfg.DB == nil || cfg.Geocoder == nil || cfg.Payments == nil || cfg.Chain == nil {
+		return nil, errors.New("cosigner, db, geocoder, payments and chain are required")
 	}
 	log := cfg.Logger
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{cfg: cfg, log: log, store: newStore(cfg.FirstAddressIndex)}, nil
+	st, err := newStore(cfg.DB)
+	if err != nil {
+		return nil, err
+	}
+	return &Server{cfg: cfg, log: log, store: st}, nil
 }
 
 // Handler returns the API routes.
@@ -123,6 +126,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// storeError logs a failed database call and answers 500.
+func (s *Server) storeError(w http.ResponseWriter, op string, err error) {
+	s.log.Error("store", "op", op, "err", err)
+	writeError(w, http.StatusInternalServerError, "internal error")
 }
 
 // statusWriter records the status code written through it.

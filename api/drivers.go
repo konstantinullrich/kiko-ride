@@ -37,8 +37,11 @@ func (s *Server) createDriver(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d, err := s.store.addDriver(d)
-	if err != nil {
+	if errors.Is(err, errConflict) {
 		writeError(w, http.StatusConflict, "a driver with this public_key is already registered")
+		return
+	} else if err != nil {
+		s.storeError(w, "add driver", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, d)
@@ -53,11 +56,15 @@ func normalizeKey(key string) string {
 // currentDriver resolves the X-Driver-Key header, writing an error if
 // unknown.
 func (s *Server) currentDriver(w http.ResponseWriter, r *http.Request) (Driver, bool) {
-	d, ok := s.store.driver(normalizeKey(r.Header.Get(HeaderDriverKey)))
-	if !ok {
+	d, err := s.store.driver(normalizeKey(r.Header.Get(HeaderDriverKey)))
+	if errors.Is(err, errNotFound) {
 		writeError(w, http.StatusUnauthorized, HeaderDriverKey+" header must carry a registered driver's public_key")
+		return Driver{}, false
+	} else if err != nil {
+		s.storeError(w, "driver", err)
+		return Driver{}, false
 	}
-	return d, ok
+	return d, true
 }
 
 type availableRide struct {
@@ -87,8 +94,13 @@ func (s *Server) availableRides(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	requested, err := s.store.ridesWithStatus(StatusRequested)
+	if err != nil {
+		s.storeError(w, "requested rides", err)
+		return
+	}
 	out := []availableRide{}
-	for _, ride := range s.store.ridesWithStatus(StatusRequested) {
+	for _, ride := range requested {
 		d := geo.Distance(loc, ride.Start)
 		if d > rangeKm {
 			continue
@@ -127,9 +139,12 @@ func (s *Server) acceptRide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rideID := r.PathValue("ride_id")
-	pending, ok := s.store.ride(rideID)
-	if !ok {
+	pending, err := s.store.ride(rideID)
+	if errors.Is(err, errNotFound) {
 		writeError(w, http.StatusNotFound, "ride not found")
+		return
+	} else if err != nil {
+		s.storeError(w, "ride", err)
 		return
 	}
 	// The address index and rider key are fixed at creation, so the address
@@ -157,6 +172,8 @@ func (s *Server) acceptRide(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "ride not found")
 	case errors.Is(err, errConflict):
 		writeError(w, http.StatusConflict, "ride is no longer available")
+	case err != nil:
+		s.storeError(w, "accept", err)
 	default:
 		writeJSON(w, http.StatusOK, s.view(ride, true))
 	}
@@ -167,9 +184,12 @@ func (s *Server) driverRide(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	ride, ok := s.store.ride(r.PathValue("ride_id"))
-	if !ok || ride.DriverKey != d.PublicKey {
+	ride, err := s.store.ride(r.PathValue("ride_id"))
+	if errors.Is(err, errNotFound) || (err == nil && ride.DriverKey != d.PublicKey) {
 		writeError(w, http.StatusNotFound, "ride not found")
+		return
+	} else if err != nil {
+		s.storeError(w, "ride", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.view(ride, true))
@@ -198,9 +218,12 @@ func (s *Server) payout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rideID := r.PathValue("ride_id")
-	ride, ok := s.store.ride(rideID)
-	if !ok || ride.DriverKey != d.PublicKey {
+	ride, err := s.store.ride(rideID)
+	if errors.Is(err, errNotFound) || (err == nil && ride.DriverKey != d.PublicKey) {
 		writeError(w, http.StatusNotFound, "ride not found")
+		return
+	} else if err != nil {
+		s.storeError(w, "ride", err)
 		return
 	}
 	wallet, _, err := s.cfg.Cosigner.RideWallet(d.PublicKey, ride.RiderKey)
@@ -223,15 +246,28 @@ func (s *Server) payout(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, errNotFound):
 		writeError(w, http.StatusNotFound, "ride not found")
 		return
-	case err != nil:
+	case errors.Is(err, errConflict):
 		writeError(w, http.StatusConflict, "ride is not paid or is already being paid out")
+		return
+	case err != nil:
+		s.storeError(w, "begin payout", err)
 		return
 	}
 	if _, err := backend.SubmitTxContext(r.Context(), s.cfg.Chain, signed); err != nil {
-		s.store.finishPayout(rideID, txID.String(), false)
+		if _, ferr := s.store.finishPayout(rideID, txID.String(), false); ferr != nil {
+			s.log.Error("store", "op", "finish payout", "ride", rideID, "err", ferr)
+		}
 		s.log.Warn("submit payout", "ride", rideID, "tx", txID, "err", err)
 		writeError(w, http.StatusBadGateway, "payout rejected: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, s.view(s.store.finishPayout(rideID, txID.String(), true), true))
+	paidOut, err := s.store.finishPayout(rideID, txID.String(), true)
+	if err != nil {
+		// Submitted but not recorded: the ride stays paid and a repeated
+		// payout is refused by the chain, its inputs being spent.
+		s.log.Error("store", "op", "finish payout", "ride", rideID, "tx", txID, "submitted", true, "err", err)
+		writeError(w, http.StatusInternalServerError, "payout "+txID.String()+" submitted but not recorded")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.view(paidOut, true))
 }

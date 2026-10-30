@@ -13,18 +13,19 @@ which the server cosigns and submits.
 - `x402/` — x402 payment middleware
 - `geo/` — geocoding (Mapbox) and distances
 
-## Run with Docker
+## Run
 
 ```sh
 cp .env.example .env   # fill in the secrets
-./start.sh             # checks .env, builds the image, (re)starts the container
+./start.sh             # exports .env and runs go run .
 ```
 
-`./start.sh --no-build` restarts without rebuilding. Or by hand:
+Drivers and rides are stored in SQLite at `KIKO_DB_PATH` (`kiko.db` by
+default). Or with Docker, keeping the database in a volume:
 
 ```sh
 docker build -t kiko-backend .
-docker run -p 8080:8080 --env-file .env kiko-backend
+docker run -p 8080:8080 --env-file .env -v kiko-data:/data kiko-backend
 ```
 
 ## Configuration
@@ -39,7 +40,7 @@ docker run -p 8080:8080 --env-file .env kiko-backend
 | `X402_FACILITATOR_URL`     | no       | Required outside preprod; defaults to the Cardano Foundation's    |
 | `BLOCKFROST_URL`           | no       | Overrides the Blockfrost base URL for the network                 |
 | `KIKO_LISTEN_ADDR`         | no       | Default `:8080`                                                   |
-| `KIKO_FIRST_ADDRESS_INDEX` | no       | Address index of the first ride; raise it after a restart        |
+| `KIKO_DB_PATH`             | no       | SQLite database file, default `kiko.db` (`/data/kiko.db` in Docker) |
 | `MAPBOX_PERMANENT`         | no       | `true` for permanent geocoding                                    |
 
 ## Development
@@ -51,9 +52,6 @@ go run .
 
 ## TODO
 
-- [ ] **Persistence.** Drivers and rides live in memory and are lost on
-      restart; address indexes must then be bumped by hand
-      (`KIKO_FIRST_ADDRESS_INDEX`).
 - [ ] **Ride completion.** There is no "completed" state, so a driver can be
       paid out as soon as the rider pays, before the ride happens.
 - [ ] **Disputes.** Hook is in `store.beginPayout`; needs a rider endpoint and a

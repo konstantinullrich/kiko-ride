@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -29,7 +28,7 @@ const cfPreprodFacilitator = "https://x402.preprod.dev.ecosyseng.cf-deployments.
 //	CARDANO_NETWORK            mainnet | preprod (default) | preview
 //	X402_FACILITATOR_URL       defaults to the Cardano Foundation facilitator on preprod
 //	KIKO_SERVER_MNEMONIC       BIP-39 mnemonic of Kiko's server cosigner keys
-//	KIKO_FIRST_ADDRESS_INDEX   address index for the first ride (default 0)
+//	KIKO_DB_PATH               SQLite database of drivers and rides (default "kiko.db")
 //	MAPBOX_ACCESS_TOKEN        Mapbox token for geocoding
 //	MAPBOX_PERMANENT           "true" for permanent geocoding (needed to store results)
 //	OGMIOS_URL, KUPO_URL       chain backend for submitting payouts (KUPO_URL optional), or
@@ -70,10 +69,12 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("KIKO_SERVER_MNEMONIC: %w", err)
 	}
-	firstIndex, err := strconv.ParseUint(envOr("KIKO_FIRST_ADDRESS_INDEX", "0"), 10, 32)
+	dbPath := envOr("KIKO_DB_PATH", "kiko.db")
+	db, err := api.OpenDB(dbPath)
 	if err != nil {
-		return fmt.Errorf("KIKO_FIRST_ADDRESS_INDEX: %w", err)
+		return fmt.Errorf("KIKO_DB_PATH: %w", err)
 	}
+	defer db.Close()
 
 	chain, err := chainContext(string(network), walletNetwork)
 	if err != nil {
@@ -91,16 +92,19 @@ func run() error {
 	}
 
 	server, err := api.New(api.Config{
-		Network:           network,
-		Cosigner:          cosigner,
-		FirstAddressIndex: uint32(firstIndex),
-		Geocoder:          geocoder,
-		Payments:          payments,
-		Chain:             chain,
+		Network:  network,
+		Cosigner: cosigner,
+		DB:       db,
+		Geocoder: geocoder,
+		Payments: payments,
+		Chain:    chain,
 	})
 	if err != nil {
 		return err
 	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/api/", server.Handler())
 
 	addr := envOr("KIKO_LISTEN_ADDR", ":8080")
 	srv := &http.Server{
@@ -110,7 +114,7 @@ func run() error {
 		// Paid requests wait for settlement, which can take minutes.
 		WriteTimeout: 4 * time.Minute,
 	}
-	slog.Info("listening", "addr", addr, "network", network, "facilitator", facilitatorURL,
+	slog.Info("listening", "addr", addr, "network", network, "db", dbPath, "facilitator", facilitatorURL,
 		"cosigner", cosigner.AccountKey())
 	return srv.ListenAndServe()
 }

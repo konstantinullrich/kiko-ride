@@ -1,7 +1,8 @@
 ### Happy path, top to bottom. Pick the "local" environment.
 # Each request stores what the next ones need (ride_id, pay_to, ...) in
-# client.global, so run them in order. State is in memory: restart the
-# server to start over (registering the driver twice answers 409).
+# client.global, so run them in order. State is kept in kiko.db: delete it
+# and restart the server to start over (registering the driver twice
+# answers 409).
 
 ### Currency
 GET {{host}}/api/v1/currency

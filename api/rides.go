@@ -66,8 +66,10 @@ func (s *Server) view(r Ride, forDriver bool) rideView {
 	}
 	if forDriver || r.Status == StatusPaid || r.Status == StatusPaidOut {
 		v.EtaMinutes, v.EtaKm = &r.EtaMinutes, &r.EtaKm
-		if d, ok := s.store.driver(r.DriverKey); ok {
+		if d, err := s.store.driver(r.DriverKey); err == nil {
 			v.Car = &d.Car
+		} else {
+			s.log.Error("store", "op", "ride driver", "ride", r.ID, "err", err)
 		}
 	}
 	return v
@@ -161,7 +163,12 @@ func (s *Server) quoteRide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := quote{StartAddress: startAddr, EndAddress: endAddr, Start: start, End: end, DistanceKm: geo.Distance(start, end)}
-	for _, d := range s.store.allDrivers() {
+	drivers, err := s.store.allDrivers()
+	if err != nil {
+		s.storeError(w, "all drivers", err)
+		return
+	}
+	for _, d := range drivers {
 		f := fare(d, q.DistanceKm)
 		if q.FareLovelace == nil {
 			q.FareLovelace = &fareRange{Min: f, Max: f}
@@ -209,7 +216,7 @@ func (s *Server) createRide(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	ride := s.store.addRide(Ride{
+	ride, err := s.store.addRide(Ride{
 		StartAddress: req.StartAddress,
 		EndAddress:   req.EndAddress,
 		Start:        start,
@@ -219,6 +226,10 @@ func (s *Server) createRide(w http.ResponseWriter, r *http.Request) {
 		RiderKey:     req.CosignerKey,
 		CreatedAt:    time.Now(),
 	})
+	if err != nil {
+		s.storeError(w, "add ride", err)
+		return
+	}
 	writeJSON(w, http.StatusCreated, s.view(ride, false))
 }
 
@@ -226,9 +237,12 @@ func (s *Server) createRide(w http.ResponseWriter, r *http.Request) {
 // x402 once; the paid response and every later one include the car.
 func (s *Server) getRide(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	ride, ok := s.store.ride(id)
-	if !ok {
+	ride, err := s.store.ride(id)
+	if errors.Is(err, errNotFound) {
 		writeError(w, http.StatusNotFound, "ride not found")
+		return
+	} else if err != nil {
+		s.storeError(w, "ride", err)
 		return
 	}
 	if ride.Status != StatusAccepted {
@@ -250,9 +264,12 @@ func (s *Server) getRide(w http.ResponseWriter, r *http.Request) {
 	var claimedTx string
 	paid := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p, _ := x402.PaymentFromContext(r.Context())
-		claimed, ok := s.store.claim(id, p.TxID)
-		if !ok {
+		claimed, err := s.store.claim(id, p.TxID)
+		if errors.Is(err, errConflict) || errors.Is(err, errNotFound) {
 			writeError(w, http.StatusConflict, "ride is already being paid")
+			return
+		} else if err != nil {
+			s.storeError(w, "claim", err)
 			return
 		}
 		claimedTx = p.TxID
@@ -264,6 +281,10 @@ func (s *Server) getRide(w http.ResponseWriter, r *http.Request) {
 	s.cfg.Payments.Require(price)(paid).ServeHTTP(sw, r)
 	if claimedTx != "" {
 		// The middleware answers 200 only after settlement succeeded.
-		s.store.finishClaim(id, claimedTx, sw.status == http.StatusOK)
+		if err := s.store.finishClaim(id, claimedTx, sw.status == http.StatusOK); err != nil {
+			// Settled but not recorded: the claim stays, so only this
+			// transaction can claim the ride again.
+			s.log.Error("store", "op", "finish claim", "ride", id, "tx", claimedTx, "settled", sw.status == http.StatusOK, "err", err)
+		}
 	}
 }

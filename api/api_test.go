@@ -3,12 +3,14 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -91,10 +93,22 @@ func (c *fakeChain) SubmitTx(tx []byte) (common.Blake2b256, error) {
 
 type env struct {
 	h           http.Handler
+	db          *sql.DB
 	chain       *fakeChain
 	cosigner    *multisig.Server
 	facilitator *fakeFacilitator
 	txB64       string // a real signed transaction
+}
+
+// newDB opens a fresh database file, closed when the test ends.
+func newDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := OpenDB(filepath.Join(t.TempDir(), "kiko.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
 }
 
 func newMnemonic(t *testing.T) string {
@@ -154,11 +168,12 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	chain := &fakeChain{FixedChainContext: fixed.NewEmptyFixedChainContext()}
-	s, err := New(Config{Network: x402.Preprod, Cosigner: cosigner, Geocoder: fakeGeocoder{}, Payments: payments, Chain: chain})
+	db := newDB(t)
+	s, err := New(Config{Network: x402.Preprod, Cosigner: cosigner, DB: db, Geocoder: fakeGeocoder{}, Payments: payments, Chain: chain})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &env{h: s.Handler(), chain: chain, cosigner: cosigner, facilitator: f, txB64: base64.StdEncoding.EncodeToString(signed)}
+	return &env{h: s.Handler(), db: db, chain: chain, cosigner: cosigner, facilitator: f, txB64: base64.StdEncoding.EncodeToString(signed)}
 }
 
 func (e *env) do(t *testing.T, method, path, driverKey string, body any) *httptest.ResponseRecorder {
@@ -317,21 +332,103 @@ func TestFailedSettlementKeepsRideUnpaid(t *testing.T) {
 }
 
 func TestClaimRefusesSecondTransaction(t *testing.T) {
-	s := newStore(0)
-	r := s.addRide(Ride{DistanceKm: 1})
-	s.accept(r.ID, Driver{PublicKey: "d"}, "addr", "script", 1, 1)
-	if _, ok := s.claim(r.ID, "tx1"); !ok {
-		t.Fatal("first claim refused")
+	s, err := newStore(newDB(t))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := s.claim(r.ID, "tx1"); !ok {
-		t.Fatal("same transaction must be able to retry")
+	r, err := s.addRide(Ride{DistanceKm: 1, PickupTime: time.Now(), CreatedAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := s.claim(r.ID, "tx2"); ok {
-		t.Fatal("second transaction must be refused")
+	if _, err := s.accept(r.ID, Driver{PublicKey: "d"}, "addr", "script", 1, 1); err != nil {
+		t.Fatal(err)
 	}
-	s.finishClaim(r.ID, "tx1", true)
+	if _, err := s.claim(r.ID, "tx1"); err != nil {
+		t.Fatal("first claim refused:", err)
+	}
+	if _, err := s.claim(r.ID, "tx1"); err != nil {
+		t.Fatal("same transaction must be able to retry:", err)
+	}
+	if _, err := s.claim(r.ID, "tx2"); !errors.Is(err, errConflict) {
+		t.Fatal("second transaction must be refused, got", err)
+	}
+	if err := s.finishClaim(r.ID, "tx1", true); err != nil {
+		t.Fatal(err)
+	}
 	if got, _ := s.ride(r.ID); got.Status != StatusPaid || got.PaymentTx != "tx1" {
 		t.Fatalf("unexpected ride: %+v", got)
+	}
+}
+
+// TestStorePersists reopens the database: drivers and rides survive, address
+// indexes are never handed out twice, and an interrupted payout is freed.
+func TestStorePersists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kiko.db")
+	open := func() (*sql.DB, *store) {
+		db, err := OpenDB(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, err := newStore(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return db, s
+	}
+
+	db, s := open()
+	d := Driver{PublicKey: "d", BaseFee: 2_000_000, FeePerKm: 500_000, Car: Car{Brand: "VW", Model: "ID.3", Color: "white", LicensePlateNumber: "B", Year: 2021}}
+	if _, err := s.addDriver(d); err != nil {
+		t.Fatal(err)
+	}
+	pickup := time.Date(2026, 11, 1, 9, 0, 0, 0, time.FixedZone("CET", 3600))
+	first, err := s.addRide(Ride{StartAddress: "a", EndAddress: "b", Start: places["Berlin Hbf"], End: places["Alexanderplatz"], DistanceKm: 3, PickupTime: pickup, CreatedAt: time.Now(), RiderKey: "r"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.addRide(Ride{DistanceKm: 1, PickupTime: pickup, CreatedAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.AddressIndex != first.AddressIndex+1 {
+		t.Fatalf("indexes %d, %d", first.AddressIndex, second.AddressIndex)
+	}
+	if _, err := s.accept(first.ID, d, "addr", "script", 4, 1.2); err != nil {
+		t.Fatal(err)
+	}
+	s.claim(first.ID, "pay")
+	s.finishClaim(first.ID, "pay", true)
+	if err := s.beginPayout(first.ID, "d"); err != nil {
+		t.Fatal(err)
+	}
+	// The second ride is deleted: its index must still not come back.
+	if _, err := db.Exec(`DELETE FROM rides WHERE id = ?`, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	db, s = open()
+	defer db.Close()
+	if got, err := s.driver("d"); err != nil || got != d {
+		t.Fatalf("driver %+v, %v", got, err)
+	}
+	got, err := s.ride(first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusPaid || got.PaymentTx != "pay" || got.FareLovelace != fare(d, 3) || got.RiderKey != "r" ||
+		got.Start != places["Berlin Hbf"] || !got.PickupTime.Equal(pickup) || got.PickupTime.Format(timeFormat) != pickup.Format(timeFormat) {
+		t.Fatalf("unexpected ride: %+v", got)
+	}
+	if err := s.beginPayout(first.ID, "d"); err != nil {
+		t.Fatal("interrupted payout must be freed on restart:", err)
+	}
+	third, err := s.addRide(Ride{DistanceKm: 1, PickupTime: pickup, CreatedAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.AddressIndex <= second.AddressIndex {
+		t.Fatalf("index %d reused after %d", third.AddressIndex, second.AddressIndex)
 	}
 }
 
@@ -398,12 +495,20 @@ func TestRideAddressCosigners(t *testing.T) {
 		expect(t, rec, http.StatusOK)
 		return decode[rideView](t, rec)
 	}
-	// Rides were created first and second, so they hold indexes 0 and 1.
-	if got, want := accept(custodial.ID).PayTo, e.rideAddress(t, d.PublicKey, "", 0); got != want {
-		t.Fatalf("custodial ride pays to %s, want server+driver+backup %s", got, want)
+	// Rides were created first and second, so they hold indexes 1 and 2.
+	got := accept(custodial.ID)
+	if got.AddressIndex == nil || *got.AddressIndex != 1 {
+		t.Fatalf("custodial ride has index %v, want 1", got.AddressIndex)
 	}
-	if got, want := accept(withKey.ID).PayTo, e.rideAddress(t, d.PublicKey, rider.AccountKey(), 1); got != want {
-		t.Fatalf("ride pays to %s, want server+driver+rider %s", got, want)
+	if want := e.rideAddress(t, d.PublicKey, "", 1); got.PayTo != want {
+		t.Fatalf("custodial ride pays to %s, want server+driver+backup %s", got.PayTo, want)
+	}
+	got = accept(withKey.ID)
+	if got.AddressIndex == nil || *got.AddressIndex != 2 {
+		t.Fatalf("ride has index %v, want 2", got.AddressIndex)
+	}
+	if want := e.rideAddress(t, d.PublicKey, rider.AccountKey(), 2); got.PayTo != want {
+		t.Fatalf("ride pays to %s, want server+driver+rider %s", got.PayTo, want)
 	}
 }
 

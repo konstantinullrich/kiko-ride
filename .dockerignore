@@ -4,3 +4,4 @@
 *.iml
 kiko-backend
 **/*_test.go
+kiko.db*
