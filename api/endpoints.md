@@ -263,15 +263,34 @@ instead.
 
 ## Driver endpoints
 
-Drivers are identified by their public key. Every driver endpoint except
-registration needs the header
+Drivers are identified by their public key, and every driver request,
+registration included, is signed with the matching private key:
 
 ```
-X-Driver-Key: acct_shared_xvk1…
+X-Driver-Key: acct_shared_xvk1…      (not on registration)
+X-Driver-Timestamp: 1793386002
+X-Driver-Signature: 5f3a…            (hex, 64 bytes)
 ```
 
-and answers `401` if it does not name a registered driver. The key is a bearer
-credential: keep it private.
+- `X-Driver-Timestamp` is the Unix time in seconds. It must be within 30
+  seconds of the server's clock, in either direction.
+- `X-Driver-Signature` is the Ed25519 signature, made with the CIP-1854
+  account private key (`m/1854'/1815'/0'`, the key behind `public_key`
+  itself, not one derived from it), over these bytes:
+
+  ```
+  kiko-driver-request\n<timestamp>\n<METHOD>\n<path and query>\n<raw body>
+  ```
+
+  `<path and query>` is the request target exactly as sent, e.g.
+  `/api/v1/driver/drive/available?location=52.52,13.37`. The body is the exact
+  bytes sent, empty for `GET`. In Go, `api.DriverMessage` builds the message
+  and `multisig.Signer.SignMessage` signs it.
+
+On registration the signature is checked against `public_key` in the body;
+everywhere else against `X-Driver-Key`, which must name a registered driver.
+A missing, stale or wrong signature answers `401`. A signature can be replayed
+for the same request within its 30 seconds, so send requests over HTTPS.
 
 ### `POST /driver` — register or update
 
@@ -305,6 +324,7 @@ fixed when they accepted.
 | 201    | registered; body echoes the driver                            |
 | 200    | already registered; profile replaced, body echoes the driver   |
 | 400    | bad JSON, invalid or server-owned `public_key`, car fields missing, or `year` out of range |
+| 401    | missing, stale or wrong signature by `public_key`              |
 
 ### `GET /driver/drive/available` — find rides
 
@@ -336,7 +356,7 @@ Returns the `requested` rides whose pickup is within range, nearest first:
 | ------ | ------------------------------------- |
 | 200    | list (possibly empty)                 |
 | 400    | bad `location` or `range`             |
-| 401    | missing or unknown `X-Driver-Key`     |
+| 401    | missing or unknown `X-Driver-Key`, or bad signature |
 
 ### `POST /driver/drive/{ride_id}` — accept a ride
 
@@ -352,7 +372,7 @@ address. Returns the ride (`accepted`) with the driver-only fields
 | ------ | ------------------------------------------------------------ |
 | 200    | accepted                                                     |
 | 400    | bad JSON or negative ETA                                     |
-| 401    | missing or unknown `X-Driver-Key`                            |
+| 401    | missing or unknown `X-Driver-Key`, or bad signature |
 | 404    | unknown ride                                                 |
 | 409    | ride already taken                                           |
 | 422    | the ride address cannot be formed (rider uses the driver's key) |
@@ -365,7 +385,7 @@ see it.
 | Status | When                                       |
 | ------ | ------------------------------------------ |
 | 200    | ride returned                              |
-| 401    | missing or unknown `X-Driver-Key`          |
+| 401    | missing or unknown `X-Driver-Key`, or bad signature |
 | 404    | unknown ride or accepted by another driver |
 
 ### `POST /driver/drive/{ride_id}/payout` — get paid
@@ -392,7 +412,7 @@ driver signed. On success it returns the ride (`paid_out`) with `payout_tx`.
 | ------ | ----------------------------------------------------------------- |
 | 200    | submitted; ride is `paid_out`                                     |
 | 400    | bad JSON or `transaction` is not hex                              |
-| 401    | missing or unknown `X-Driver-Key`                                 |
+| 401    | missing or unknown `X-Driver-Key`, or bad signature |
 | 404    | unknown ride or accepted by another driver                        |
 | 409    | ride is not `paid`, already `paid_out`, or a payout is in progress |
 | 422    | not signed by the driver, wrong script, or an invalid signature   |

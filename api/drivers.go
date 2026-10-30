@@ -17,7 +17,13 @@ import (
 	"kiko-backend/multisig"
 )
 
+// createDriver registers a driver, or replaces their profile. The request
+// must be signed by the public_key it registers.
 func (s *Server) createDriver(w http.ResponseWriter, r *http.Request) {
+	body, ok := readBody(w, r)
+	if !ok {
+		return
+	}
 	var d Driver
 	if !decodeJSON(w, r, &d) {
 		return
@@ -25,6 +31,9 @@ func (s *Server) createDriver(w http.ResponseWriter, r *http.Request) {
 	d.PublicKey = normalizeKey(d.PublicKey)
 	if err := s.cfg.Cosigner.CheckCosignerKey(d.PublicKey); err != nil {
 		writeError(w, http.StatusBadRequest, "public_key must be an acct_shared_xvk cosigner key: "+err.Error())
+		return
+	}
+	if !s.checkSignature(w, r, d.PublicKey, body) {
 		return
 	}
 	if d.Car.Brand == "" || d.Car.Model == "" || d.Car.Color == "" || d.Car.LicensePlateNumber == "" {
@@ -56,10 +65,20 @@ func normalizeKey(key string) string {
 	return strings.ToLower(strings.TrimSpace(key))
 }
 
-// currentDriver resolves the X-Driver-Key header, writing an error if
-// unknown.
+// currentDriver resolves the X-Driver-Key header and checks the request's
+// signature by that key, writing an error if either fails. The body stays
+// readable for the handler.
 func (s *Server) currentDriver(w http.ResponseWriter, r *http.Request) (Driver, bool) {
-	d, err := s.store.driver(normalizeKey(r.Header.Get(HeaderDriverKey)))
+	key := normalizeKey(r.Header.Get(HeaderDriverKey))
+	if key == "" {
+		writeError(w, http.StatusUnauthorized, HeaderDriverKey+" header must carry a registered driver's public_key")
+		return Driver{}, false
+	}
+	body, ok := readBody(w, r)
+	if !ok || !s.checkSignature(w, r, key, body) {
+		return Driver{}, false
+	}
+	d, err := s.store.driver(key)
 	if errors.Is(err, errNotFound) {
 		writeError(w, http.StatusUnauthorized, HeaderDriverKey+" header must carry a registered driver's public_key")
 		return Driver{}, false
@@ -84,6 +103,9 @@ type availableRide struct {
 // availableRides lists requested rides whose pickup lies within range km of
 // location, nearest first.
 func (s *Server) availableRides(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.currentDriver(w, r); !ok {
+		return
+	}
 	loc, err := geo.ParsePoint(r.URL.Query().Get("location"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "location must be lat,lng")

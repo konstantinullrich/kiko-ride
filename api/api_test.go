@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -121,13 +122,31 @@ func newMnemonic(t *testing.T) string {
 	return m
 }
 
+// signers holds every test signer by account key, so requests for a driver
+// can be signed with their key.
+var signers sync.Map
+
 func newSigner(t *testing.T) *multisig.Signer {
 	t.Helper()
 	s, err := multisig.NewSigner(newMnemonic(t), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	signers.Store(s.AccountKey(), s)
 	return s
+}
+
+// signRequest signs req as the driver with key at time at, if key belongs
+// to a test signer.
+func signRequest(req *http.Request, key string, body []byte, at time.Time) {
+	signer, ok := signers.Load(normalizeKey(key))
+	if !ok {
+		return
+	}
+	ts := at.Unix()
+	sig := signer.(*multisig.Signer).SignMessage(DriverMessage(ts, req.Method, req.RequestURI, body))
+	req.Header.Set(HeaderDriverTimestamp, strconv.FormatInt(ts, 10))
+	req.Header.Set(HeaderDriverSignature, hex.EncodeToString(sig))
 }
 
 func newEnv(t *testing.T) *env {
@@ -177,16 +196,23 @@ func newEnv(t *testing.T) *env {
 	return &env{s: s, h: s.Handler(), db: db, chain: chain, cosigner: cosigner, facilitator: f, txB64: base64.StdEncoding.EncodeToString(signed)}
 }
 
+// do sends a request, signed as the driver with driverKey or, for
+// registration, as the public_key in the body.
 func (e *env) do(t *testing.T, method, path, driverKey string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	var buf bytes.Buffer
 	if body != nil {
 		json.NewEncoder(&buf).Encode(body)
 	}
+	raw := bytes.Clone(buf.Bytes())
 	req := httptest.NewRequest(method, path, &buf)
+	signer := driverKey
 	if driverKey != "" {
 		req.Header.Set(HeaderDriverKey, driverKey)
+	} else if m, ok := body.(map[string]any); ok {
+		signer, _ = m["public_key"].(string)
 	}
+	signRequest(req, signer, raw, time.Now())
 	rec := httptest.NewRecorder()
 	e.h.ServeHTTP(rec, req)
 	return rec
@@ -267,12 +293,12 @@ func TestRideLifecycle(t *testing.T) {
 	// Free while no driver has accepted.
 	expect(t, e.do(t, http.MethodGet, "/api/v1/ride/"+ride.ID, "", nil), http.StatusOK)
 
-	avail := e.do(t, http.MethodGet, "/api/v1/driver/drive/available?location=52.52,13.37&range=2", "", nil)
+	avail := e.do(t, http.MethodGet, "/api/v1/driver/drive/available?location=52.52,13.37&range=2", d.PublicKey, nil)
 	expect(t, avail, http.StatusOK)
 	if got := decode[[]availableRide](t, avail); len(got) != 1 || got[0].ID != ride.ID {
 		t.Fatalf("expected the ride to be available, got %+v", got)
 	}
-	far := e.do(t, http.MethodGet, "/api/v1/driver/drive/available?location=48.137,11.575&range=6", "", nil)
+	far := e.do(t, http.MethodGet, "/api/v1/driver/drive/available?location=48.137,11.575&range=6", d.PublicKey, nil)
 	if got := decode[[]availableRide](t, far); len(got) != 0 {
 		t.Fatalf("expected no rides near Munich, got %+v", got)
 	}
@@ -749,4 +775,55 @@ func TestDriverPayout(t *testing.T) {
 			t.Fatalf("rider view leaks the driver's public key: %s", raw)
 		}
 	}
+}
+
+func TestDriverSignature(t *testing.T) {
+	e := newEnv(t)
+	d := e.registerDriver(t)
+	other := e.registerDriver(t)
+	ride := e.createRide(t)
+	accept := "/api/v1/driver/drive/" + ride.ID
+	body := []byte(`{"eta_minutes":4}`)
+
+	send := func(path, key string, signedBody []byte, signedPath string, at time.Time) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+		req.Header.Set(HeaderDriverKey, d.PublicKey)
+		signed := httptest.NewRequest(http.MethodPost, signedPath, nil)
+		signRequest(signed, key, signedBody, at)
+		for _, h := range []string{HeaderDriverTimestamp, HeaderDriverSignature} {
+			req.Header.Set(h, signed.Header.Get(h))
+		}
+		rec := httptest.NewRecorder()
+		e.h.ServeHTTP(rec, req)
+		return rec
+	}
+	now := time.Now()
+	for name, rec := range map[string]*httptest.ResponseRecorder{
+		"unsigned":      send(accept, "", body, accept, now),
+		"stale":         send(accept, d.PublicKey, body, accept, now.Add(-MaxSignatureAge-time.Second)),
+		"future":        send(accept, d.PublicKey, body, accept, now.Add(MaxSignatureAge+time.Second)),
+		"other driver":  send(accept, other.PublicKey, body, accept, now),
+		"tampered body": send(accept, d.PublicKey, []byte(`{"eta_minutes":5}`), accept, now),
+		"other ride":    send(accept, d.PublicKey, body, "/api/v1/driver/drive/other", now),
+	} {
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s: expected 401, got %d: %s", name, rec.Code, rec.Body.String())
+		}
+	}
+	expect(t, send(accept, d.PublicKey, body, accept, now.Add(-MaxSignatureAge+time.Second)), http.StatusOK)
+
+	// Registration must be signed by the key it registers, so nobody else
+	// can replace a driver's profile.
+	profile := map[string]any{
+		"public_key": d.PublicKey,
+		"base_fee":   1,
+		"fee_per_km": 1,
+		"car":        map[string]any{"brand": "VW", "model": "ID.3", "color": "white", "license_plate_number": "B", "year": 2021},
+	}
+	raw, _ := json.Marshal(profile)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/driver", bytes.NewReader(raw))
+	signRequest(req, other.PublicKey, raw, now)
+	rec := httptest.NewRecorder()
+	e.h.ServeHTTP(rec, req)
+	expect(t, rec, http.StatusUnauthorized)
 }

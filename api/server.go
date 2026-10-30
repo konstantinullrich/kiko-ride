@@ -111,7 +111,7 @@ func fare(d Driver, km float64) uint64 {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())

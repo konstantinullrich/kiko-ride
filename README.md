@@ -58,8 +58,8 @@ go run .
       dispute window before payouts.
 - [ ] **Refunds and cancellation.** No way to cancel a ride or refund the rider
       (e.g. driver no-show); requested rides never expire.
-- [ ] **Driver authentication.** `X-Driver-Key` is a bearer credential; sign
-      each request with the driver's key instead.
+- [x] **Driver authentication.** Driver requests are signed with the
+      driver's key (`X-Driver-Signature`, `X-Driver-Timestamp`).
 - [ ] **Rider access.** Anyone with a ride id can view the ride.
 - [ ] **Payout policy.** The server does not check payout outputs (amount,
       destination, Kiko fee).

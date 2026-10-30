@@ -1,6 +1,7 @@
 package multisig
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 
@@ -99,4 +100,24 @@ func (s *Signer) AccountKey() string {
 // paymentKey derives the payment signing key at role 0, index i.
 func (s *Signer) paymentKey(index uint32) (bip32.XPrv, error) {
 	return bursa.GetMultiSigPaymentKey(s.account, index)
+}
+
+// SignMessage signs msg with the account key itself, to authenticate the
+// cosigner off chain. Transactions are only ever signed with the keys
+// derived below it, so these signatures cannot witness a spend.
+func (s *Signer) SignMessage(msg []byte) []byte {
+	return s.account.Sign(msg)
+}
+
+// VerifyMessage checks that sig is SignMessage's signature over msg by the
+// holder of accountKey.
+func VerifyMessage(accountKey string, msg, sig []byte) error {
+	xpub, err := ParseAccountKey(accountKey)
+	if err != nil {
+		return err
+	}
+	if len(sig) != ed25519.SignatureSize || !ed25519.Verify(ed25519.PublicKey(xpub.PublicKey()), msg, sig) {
+		return errors.New("signature does not verify")
+	}
+	return nil
 }
