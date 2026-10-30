@@ -232,6 +232,29 @@ Free while the ride is `requested`, `paid` or `paid_out`. While it is
 
 ---
 
+## MCP server
+
+The rider endpoints are also served as [MCP](https://modelcontextprotocol.io)
+tools at `/mcp` (streamable HTTP, stateless), so an agent can book and pay for
+a ride. Each tool runs the matching route above, with the same validation,
+fares and payments.
+
+| Tool             | Route             | Arguments                                                  |
+| ---------------- | ----------------- | ---------------------------------------------------------- |
+| `search_address` | `GET /search`     | `q`, `limit`                                               |
+| `quote_ride`     | `GET /ride`       | `start_address`, `end_address`, `start`, `end` (`{lat, lng}`) |
+| `request_ride`   | `POST /ride`      | the request body                                           |
+| `get_ride`       | `GET /ride/{id}`  | `id`, `payment_signature`                                  |
+
+A tool returns the route's JSON body. From status 400 on the result is an
+error whose text is `"<status> <reason>: <body>"`. So while a ride is
+`accepted`, `get_ride` fails with `402 Payment Required:` and the x402
+requirements; calling it again with `payment_signature` (the base64
+`PAYMENT-SIGNATURE` value) pays the fare. A paid result has a second text
+content, `x402 settlement: <PAYMENT-RESPONSE JSON>`.
+
+---
+
 ## Driver endpoints
 
 Drivers are identified by their public key. Every driver endpoint except

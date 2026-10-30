@@ -8,7 +8,8 @@ Kiko server, the driver and the rider (or a second server key if the rider
 brings none). The driver is paid out by signing a spend from that address,
 which the server cosigns and submits.
 
-- `api/` — HTTP API ([endpoints](api/endpoints.md))
+- `api/` — HTTP API ([endpoints](api/endpoints.md)), and the rider endpoints
+  as an MCP server at `/mcp` ([tools](api/endpoints.md#mcp-server))
 - `multisig/` — CIP-1854 multisig wallets and the server cosigner
 - `x402/` — x402 payment middleware
 - `geo/` — geocoding (Mapbox) and distances

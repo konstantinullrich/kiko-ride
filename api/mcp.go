@@ -1,0 +1,164 @@
+package api
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"kiko-backend/geo"
+	"kiko-backend/x402"
+)
+
+// mcpOriginHeader carries the scheme and host the MCP request came in on, so
+// the rider endpoints called on its behalf name the same x402 resource URL
+// as a direct call would.
+const mcpOriginHeader = "X-Kiko-Mcp-Origin"
+
+// MCPHandler serves the rider endpoints as MCP tools over the streamable
+// HTTP transport. Each tool call runs the matching /api/v1 route in-process,
+// so validation, fares and x402 payments behave exactly as over REST.
+func (s *Server) MCPHandler() http.Handler {
+	srv := mcp.NewServer(&mcp.Implementation{Name: "kiko", Title: "Kiko rides", Version: "v1"}, &mcp.ServerOptions{
+		Instructions: "Book Kiko rides paid in ADA. Look up addresses with search_address, price a trip with quote_ride, " +
+			"book it with request_ride, then poll get_ride. Once a driver accepts, get_ride answers 402 with x402 payment " +
+			"requirements; pay by calling get_ride again with payment_signature. Amounts are in lovelace (1 ADA = 1,000,000).",
+	})
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "search_address",
+		Description: "List addresses matching free text, best first, so the rider can check which place an address resolves to. Pass the lat/lng of the chosen result to quote_ride and request_ride.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+	}, s.mcpSearch)
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "quote_ride",
+		Description: "Quote a ride: the straight-line distance and the fare range in lovelace over all registered drivers (omitted when none are registered).",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+	}, s.mcpQuote)
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "request_ride",
+		Description: "Request a ride. Returns the ride in status requested; keep its id to poll it with get_ride. Without cosigner_key the ride is custodial: the server holds two of the three keys of the ride's payment address.",
+	}, s.mcpRequestRide)
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "get_ride",
+		Description: "Get a ride. Free while it is requested, paid or paid_out. Once a driver accepts it, the fare must be paid once with x402 v2 " +
+			"(exact scheme, Cardano): without payment_signature this answers 402 with the requirements. Build and sign a transaction paying " +
+			"amount to payTo, then call again with payment_signature. The paid response includes the car; settlement can take minutes.",
+	}, s.mcpGetRide)
+
+	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{Stateless: true})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		r.Header.Set(mcpOriginHeader, scheme+"://"+r.Host)
+		h.ServeHTTP(w, r)
+	})
+}
+
+type searchInput struct {
+	Query string `json:"q" jsonschema:"free-form address"`
+	Limit int    `json:"limit,omitempty" jsonschema:"number of results, 1-10, default 5"`
+}
+
+func (s *Server) mcpSearch(ctx context.Context, req *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, any, error) {
+	q := url.Values{"q": {in.Query}}
+	if in.Limit != 0 {
+		q.Set("limit", strconv.Itoa(in.Limit))
+	}
+	return s.callRoute(ctx, req, http.MethodGet, "/api/v1/search?"+q.Encode(), nil, "")
+}
+
+type quoteInput struct {
+	StartAddress string     `json:"start_address" jsonschema:"pickup address"`
+	EndAddress   string     `json:"end_address" jsonschema:"drop-off address"`
+	Start        *geo.Point `json:"start,omitempty" jsonschema:"coordinates of the pickup; skips geocoding start_address"`
+	End          *geo.Point `json:"end,omitempty" jsonschema:"coordinates of the drop-off; skips geocoding end_address"`
+}
+
+func (s *Server) mcpQuote(ctx context.Context, req *mcp.CallToolRequest, in quoteInput) (*mcp.CallToolResult, any, error) {
+	q := url.Values{"start_address": {in.StartAddress}, "end_address": {in.EndAddress}}
+	for name, p := range map[string]*geo.Point{"start": in.Start, "end": in.End} {
+		if p != nil {
+			q.Set(name, strconv.FormatFloat(p.Lat, 'f', -1, 64)+","+strconv.FormatFloat(p.Lng, 'f', -1, 64))
+		}
+	}
+	return s.callRoute(ctx, req, http.MethodGet, "/api/v1/ride?"+q.Encode(), nil, "")
+}
+
+// requestRideInput is POST /api/v1/ride's body; its JSON names match
+// createRideRequest.
+type requestRideInput struct {
+	StartAddress string     `json:"start_address" jsonschema:"pickup address"`
+	EndAddress   string     `json:"end_address" jsonschema:"drop-off address"`
+	PickupTime   string     `json:"pickup_time" jsonschema:"pickup time, RFC 3339"`
+	CosignerKey  string     `json:"cosigner_key,omitempty" jsonschema:"the rider's CIP-1854 account public key (acct_shared_xvk1...) that cosigns the ride address"`
+	Start        *geo.Point `json:"start,omitempty" jsonschema:"coordinates of the pickup; skips geocoding start_address"`
+	End          *geo.Point `json:"end,omitempty" jsonschema:"coordinates of the drop-off; skips geocoding end_address"`
+}
+
+func (s *Server) mcpRequestRide(ctx context.Context, req *mcp.CallToolRequest, in requestRideInput) (*mcp.CallToolResult, any, error) {
+	body, err := json.Marshal(in)
+	if err != nil {
+		return nil, nil, err
+	}
+	return s.callRoute(ctx, req, http.MethodPost, "/api/v1/ride", body, "")
+}
+
+type getRideInput struct {
+	ID string `json:"id" jsonschema:"ride id from request_ride"`
+	// PaymentSignature is sent as the PAYMENT-SIGNATURE header.
+	PaymentSignature string `json:"payment_signature,omitempty" jsonschema:"base64 x402 PaymentPayload paying the fare, as in the PAYMENT-SIGNATURE header"`
+}
+
+func (s *Server) mcpGetRide(ctx context.Context, req *mcp.CallToolRequest, in getRideInput) (*mcp.CallToolResult, any, error) {
+	if in.ID == "" {
+		return toolError("id is required"), nil, nil
+	}
+	return s.callRoute(ctx, req, http.MethodGet, "/api/v1/ride/"+url.PathEscape(in.ID), nil, in.PaymentSignature)
+}
+
+// callRoute runs an API route in-process and turns its response into a tool
+// result: the JSON body, flagged as an error from status 400 on, followed by
+// the decoded x402 settlement when there is one.
+func (s *Server) callRoute(ctx context.Context, req *mcp.CallToolRequest, method, target string, body []byte, paymentSignature string) (*mcp.CallToolResult, any, error) {
+	origin := "http://localhost"
+	if req.Extra != nil && req.Extra.Header.Get(mcpOriginHeader) != "" {
+		origin = req.Extra.Header.Get(mcpOriginHeader)
+	}
+	r, err := http.NewRequestWithContext(ctx, method, origin+target, bytes.NewReader(body))
+	if err != nil {
+		return nil, nil, err
+	}
+	if body != nil {
+		r.Header.Set("Content-Type", "application/json")
+	}
+	if paymentSignature != "" {
+		r.Header.Set(x402.HeaderPaymentSignature, paymentSignature)
+	}
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, r)
+
+	res := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: rec.Body.String()}}}
+	if rec.Code >= 400 {
+		res.IsError = true
+		res.Content[0] = &mcp.TextContent{Text: fmt.Sprintf("%d %s: %s", rec.Code, http.StatusText(rec.Code), rec.Body.String())}
+	}
+	if v := rec.Header().Get(x402.HeaderPaymentResponse); v != "" {
+		if settlement, err := base64.StdEncoding.DecodeString(v); err == nil {
+			res.Content = append(res.Content, &mcp.TextContent{Text: "x402 settlement: " + string(settlement)})
+		}
+	}
+	return res, nil, nil
+}
+
+func toolError(msg string) *mcp.CallToolResult {
+	return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: msg}}}
+}

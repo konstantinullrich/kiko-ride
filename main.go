@@ -105,11 +105,12 @@ func run() error {
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", server.Handler())
+	mux.Handle("/mcp", server.MCPHandler())
 
 	addr := envOr("KIKO_LISTEN_ADDR", ":8080")
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           server.Handler(),
+		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		// Paid requests wait for settlement, which can take minutes.
 		WriteTimeout: 4 * time.Minute,

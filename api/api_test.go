@@ -92,6 +92,7 @@ func (c *fakeChain) SubmitTx(tx []byte) (common.Blake2b256, error) {
 }
 
 type env struct {
+	s           *Server
 	h           http.Handler
 	db          *sql.DB
 	chain       *fakeChain
@@ -173,7 +174,7 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &env{h: s.Handler(), db: db, chain: chain, cosigner: cosigner, facilitator: f, txB64: base64.StdEncoding.EncodeToString(signed)}
+	return &env{s: s, h: s.Handler(), db: db, chain: chain, cosigner: cosigner, facilitator: f, txB64: base64.StdEncoding.EncodeToString(signed)}
 }
 
 func (e *env) do(t *testing.T, method, path, driverKey string, body any) *httptest.ResponseRecorder {
