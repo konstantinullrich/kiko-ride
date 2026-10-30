@@ -25,6 +25,11 @@ go.work.sum
 # env file
 .env
 
+# Website build output; dist/.gitkeep keeps go:embed happy before a build
+web/node_modules/
+web/dist/*
+!web/dist/.gitkeep
+
 # SQLite database
 kiko.db
 kiko.db-*

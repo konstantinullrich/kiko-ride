@@ -18,6 +18,7 @@ import (
 	"kiko-backend/bsvmultisig"
 	"kiko-backend/geo"
 	"kiko-backend/multisig"
+	"kiko-backend/web"
 	"kiko-backend/x402"
 	"kiko-backend/x402/bsvfacilitator"
 )
@@ -122,6 +123,7 @@ func run() error {
 	mux := http.NewServeMux()
 	mux.Handle("/api/", server.Handler())
 	mux.Handle("/mcp", server.MCPHandler())
+	mux.Handle("/", web.Handler())
 
 	addr := envOr("KIKO_LISTEN_ADDR", ":8080")
 	srv := &http.Server{

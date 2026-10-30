@@ -5,3 +5,5 @@
 kiko-backend
 **/*_test.go
 kiko.db*
+web/node_modules
+web/dist
