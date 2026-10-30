@@ -1,0 +1,6 @@
+.git
+.idea
+.env
+*.iml
+kiko-backend
+**/*_test.go

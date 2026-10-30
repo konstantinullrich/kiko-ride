@@ -1,0 +1,102 @@
+### Happy path, top to bottom. Pick the "local" environment.
+# Each request stores what the next ones need (ride_id, pay_to, ...) in
+# client.global, so run them in order. State is in memory: restart the
+# server to start over (registering the driver twice answers 409).
+
+### Currency
+GET {{host}}/api/v1/currency
+
+### 1. Register the driver
+POST {{host}}/api/v1/driver
+Content-Type: application/json
+
+{
+  "public_key": "{{driver_key}}",
+  "base_fee": 2000000,
+  "fee_per_km": 500000,
+  "car": {
+    "brand": "VW",
+    "model": "ID.3",
+    "color": "white",
+    "license_plate_number": "B-KK 402"
+  }
+}
+
+### 2. Quote the ride (fare range over registered drivers)
+GET {{host}}/api/v1/ride?start_address={{start_address_query}}&end_address={{end_address_query}}
+
+### 3a. Request a ride with the rider's cosigner key
+POST {{host}}/api/v1/ride
+Content-Type: application/json
+
+{
+  "start_address": "{{start_address}}",
+  "end_address": "{{end_address}}",
+  "pickup_time": "{{$isoTimestamp}}",
+  "cosigner_key": "{{rider_key}}"
+}
+
+> {%
+  client.test("ride created", () => client.assert(response.status === 201, "status " + response.status));
+  client.global.set("ride_id", response.body.id);
+%}
+
+### 3b. Or: request a custodial ride (server takes the rider's place)
+POST {{host}}/api/v1/ride
+Content-Type: application/json
+
+{
+  "start_address": "{{start_address}}",
+  "end_address": "{{end_address}}",
+  "pickup_time": "{{$isoTimestamp}}"
+}
+
+> {% client.global.set("ride_id", response.body.id); %}
+
+### 4. Rider polls the ride: free while requested
+GET {{host}}/api/v1/ride/{{ride_id}}
+
+### 5. Driver looks for rides nearby
+GET {{host}}/api/v1/driver/drive/available?location={{driver_location}}&range=50000
+X-Driver-Key: {{driver_key}}
+
+### 6. Driver accepts the ride: fixes fare and pay_to
+POST {{host}}/api/v1/driver/drive/{{ride_id}}
+Content-Type: application/json
+X-Driver-Key: {{driver_key}}
+
+{ "eta_minutes": 4, "eta_km": 1.2 }
+
+> {%
+  client.global.set("pay_to", response.body.pay_to);
+  client.global.set("fare_lovelace", response.body.fare_lovelace);
+  client.global.set("address_index", response.body.address_index);
+  client.global.set("script", response.body.script);
+%}
+
+### 7. Driver views the accepted ride (address_index, script)
+GET {{host}}/api/v1/driver/drive/{{ride_id}}
+X-Driver-Key: {{driver_key}}
+
+### 8. Rider polls again: 402 with the x402 payment requirements
+GET {{host}}/api/v1/ride/{{ride_id}}
+
+> {%
+  client.test("payment required", () => client.assert(response.status === 402, "status " + response.status));
+  client.global.set("payment_required", response.headers.valueOf("PAYMENT-REQUIRED"));
+%}
+
+### 9. Rider pays: set payment_signature to base64 of
+#   {"x402Version":2,"accepted":<entry from accepts>,
+#    "payload":{"transaction":"<base64 signed tx CBOR>","nonce":"<txHash>#<index>"}}
+# The tx pays fare_lovelace to pay_to. Settlement can take minutes.
+GET {{host}}/api/v1/ride/{{ride_id}}
+PAYMENT-SIGNATURE: {{payment_signature}}
+
+### 10. Driver payout: hex CBOR of a tx spending pay_to, with the ride's
+# script attached, signed by the driver's key at address_index.
+POST {{host}}/api/v1/driver/drive/{{ride_id}}/payout
+Content-Type: application/json
+X-Driver-Key: {{driver_key}}
+
+{ "transaction": "{{payout_tx_hex}}" }

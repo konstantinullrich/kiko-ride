@@ -1,0 +1,97 @@
+### Error cases. Most need the driver registered and ride_id set by
+### ride-flow.http first.
+
+### 400: quote without end_address
+GET {{host}}/api/v1/ride?start_address={{start_address_query}}
+
+### 422: address that cannot be geocoded
+GET {{host}}/api/v1/ride?start_address=zzzqqq-nowhere-xyz&end_address={{end_address_query}}
+
+### 400: ride without pickup_time
+POST {{host}}/api/v1/ride
+Content-Type: application/json
+
+{ "start_address": "{{start_address}}", "end_address": "{{end_address}}" }
+
+### 400: invalid cosigner_key
+POST {{host}}/api/v1/ride
+Content-Type: application/json
+
+{
+  "start_address": "{{start_address}}",
+  "end_address": "{{end_address}}",
+  "pickup_time": "{{$isoTimestamp}}",
+  "cosigner_key": "acct_shared_xvk1invalid"
+}
+
+### 400: unknown JSON field
+POST {{host}}/api/v1/ride
+Content-Type: application/json
+
+{
+  "start_address": "{{start_address}}",
+  "end_address": "{{end_address}}",
+  "pickup_time": "{{$isoTimestamp}}",
+  "tip": 1
+}
+
+### 404: unknown ride
+GET {{host}}/api/v1/ride/does-not-exist
+
+### 409: driver already registered
+POST {{host}}/api/v1/driver
+Content-Type: application/json
+
+{
+  "public_key": "{{driver_key}}",
+  "base_fee": 2000000,
+  "fee_per_km": 500000,
+  "car": { "brand": "VW", "model": "ID.3", "color": "white", "license_plate_number": "B-KK 402" }
+}
+
+### 400: driver with car fields missing
+POST {{host}}/api/v1/driver
+Content-Type: application/json
+
+{
+  "public_key": "{{rider_key}}",
+  "base_fee": 2000000,
+  "fee_per_km": 500000,
+  "car": { "brand": "VW" }
+}
+
+### 401: driver endpoint without X-Driver-Key
+GET {{host}}/api/v1/driver/drive/available?location={{driver_location}}
+
+### 401: unregistered driver key
+GET {{host}}/api/v1/driver/drive/available?location={{driver_location}}
+X-Driver-Key: {{rider_key}}
+
+### 400: bad location
+GET {{host}}/api/v1/driver/drive/available?location=north
+X-Driver-Key: {{driver_key}}
+
+### 400: negative ETA
+POST {{host}}/api/v1/driver/drive/{{ride_id}}
+Content-Type: application/json
+X-Driver-Key: {{driver_key}}
+
+{ "eta_minutes": -1, "eta_km": 1.2 }
+
+### 409: accept an already accepted ride
+POST {{host}}/api/v1/driver/drive/{{ride_id}}
+Content-Type: application/json
+X-Driver-Key: {{driver_key}}
+
+{ "eta_minutes": 4, "eta_km": 1.2 }
+
+### 422: payout transaction not signed by the driver
+POST {{host}}/api/v1/driver/drive/{{ride_id}}/payout
+Content-Type: application/json
+X-Driver-Key: {{driver_key}}
+
+{ "transaction": "84a0" }
+
+### 402: garbage payment signature
+GET {{host}}/api/v1/ride/{{ride_id}}
+PAYMENT-SIGNATURE: bm90IGEgcGF5bWVudA==

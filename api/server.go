@@ -87,6 +87,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/ride", s.quoteRide)
 	mux.HandleFunc("POST /api/v1/ride", s.createRide)
 	mux.HandleFunc("GET /api/v1/ride/{id}", s.getRide)
+	mux.HandleFunc("GET /api/v1/currency", s.getCurrency)
 	return mux
 }
 
@@ -135,4 +136,8 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 		w.status = http.StatusOK
 	}
 	return w.ResponseWriter.Write(b)
+}
+
+func (s *Server) getCurrency(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"currency": "cardano"})
 }

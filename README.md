@@ -1,0 +1,68 @@
+# kiko-backend
+
+Backend for Kiko, a ride-hailing service paid in ADA on Cardano.
+
+Riders request rides, drivers accept them, and the rider pays the fare with
+[x402](https://x402.org) into a per-ride 2-of-3 multisig address held by the
+Kiko server, the driver and the rider (or a second server key if the rider
+brings none). The driver is paid out by signing a spend from that address,
+which the server cosigns and submits.
+
+- `api/` — HTTP API ([endpoints](api/endpoints.md))
+- `multisig/` — CIP-1854 multisig wallets and the server cosigner
+- `x402/` — x402 payment middleware
+- `geo/` — geocoding (Mapbox) and distances
+
+## Run with Docker
+
+```sh
+cp .env.example .env   # fill in the secrets
+./start.sh             # checks .env, builds the image, (re)starts the container
+```
+
+`./start.sh --no-build` restarts without rebuilding. Or by hand:
+
+```sh
+docker build -t kiko-backend .
+docker run -p 8080:8080 --env-file .env kiko-backend
+```
+
+## Configuration
+
+| Variable                   | Required | Description                                                       |
+| -------------------------- | -------- | ----------------------------------------------------------------- |
+| `KIKO_SERVER_MNEMONIC`     | yes      | BIP-39 mnemonic of the server's cosigner keys. Keep it secret.    |
+| `MAPBOX_ACCESS_TOKEN`      | yes      | Mapbox token for geocoding                                        |
+| `OGMIOS_URL`               | one of   | Ogmios endpoint for submitting payouts (`KUPO_URL` optional)      |
+| `BLOCKFROST_PROJECT_ID`    | one of   | Blockfrost project id, used when `OGMIOS_URL` is unset            |
+| `CARDANO_NETWORK`          | no       | `preprod` (default), `preview` or `mainnet`                       |
+| `X402_FACILITATOR_URL`     | no       | Required outside preprod; defaults to the Cardano Foundation's    |
+| `BLOCKFROST_URL`           | no       | Overrides the Blockfrost base URL for the network                 |
+| `KIKO_LISTEN_ADDR`         | no       | Default `:8080`                                                   |
+| `KIKO_FIRST_ADDRESS_INDEX` | no       | Address index of the first ride; raise it after a restart        |
+| `MAPBOX_PERMANENT`         | no       | `true` for permanent geocoding                                    |
+
+## Development
+
+```sh
+go test ./...
+go run .
+```
+
+## TODO
+
+- [ ] **Persistence.** Drivers and rides live in memory and are lost on
+      restart; address indexes must then be bumped by hand
+      (`KIKO_FIRST_ADDRESS_INDEX`).
+- [ ] **Ride completion.** There is no "completed" state, so a driver can be
+      paid out as soon as the rider pays, before the ride happens.
+- [ ] **Disputes.** Hook is in `store.beginPayout`; needs a rider endpoint and a
+      dispute window before payouts.
+- [ ] **Refunds and cancellation.** No way to cancel a ride or refund the rider
+      (e.g. driver no-show); requested rides never expire.
+- [ ] **Driver authentication.** `X-Driver-Key` is a bearer credential; sign
+      each request with the driver's key instead.
+- [ ] **Rider access.** Anyone with a ride id can view the ride.
+- [ ] **Payout policy.** The server does not check payout outputs (amount,
+      destination, Kiko fee).
+- [ ] **Interface.** The server is a REST API; add a MCP.
