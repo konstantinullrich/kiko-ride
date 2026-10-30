@@ -31,7 +31,7 @@ requested ──(driver accepts)──> accepted ──(rider pays via x402)─�
 
 ### Ride address (2-of-3 multisig)
 
-Each ride is paid to its own native-script address that any two of three keys
+Each ride is paid to its own 2-of-3 multisig output that any two of three keys
 can spend:
 
 | Key    | Source                                                             |
@@ -40,9 +40,16 @@ can spend:
 | Driver | The driver's `public_key`                                          |
 | Rider  | The rider's `cosigner_key`, or a second server key if none is given |
 
-All keys are CIP-1854 account keys (`acct_shared_xvk1…`); each party's key for
-a ride is derived at the ride's `address_index` (role 0). If the rider gives no
-key the ride is `custodial` and the server holds two of the three keys.
+All three are account keys on the driver's chain, and each party's key for a
+ride is derived from them at the ride's `address_index` (role 0):
+
+| Chain   | Account keys                                  | Ride key                               | Locked by                                       |
+| ------- | --------------------------------------------- | -------------------------------------- | ----------------------------------------------- |
+| Cardano | CIP-1854 `acct_shared_xvk1…`                  | `m/1854'/1815'/account'/0/address_index` | native script `atLeast 2`, at its script address (`addr1w…`/`addr_test1w…`) |
+| BSV     | BIP-32 `xpub…`/`tpub…` at `m/48'/236'/account'` | `m/48'/236'/account'/0/address_index`    | bare `OP_2 <keys> OP_3 OP_CHECKMULTISIG` output, keys sorted (BIP-67); it has no address |
+
+If the rider gives no key the ride is `custodial` and the server holds two of
+the three keys.
 
 ## Ride object
 
@@ -195,7 +202,7 @@ it.
 | Status | When                                                         |
 | ------ | ------------------------------------------------------------ |
 | 201    | created; body is the ride (`requested`)                      |
-| 400    | missing fields, bad JSON, invalid `start`/`end`, or an invalid or server-owned `cosigner_key` |
+| 400    | missing fields, bad JSON, invalid `start`/`end`, an invalid or server-owned `cosigner_key`, or a BSV key while BSV is off |
 | 422    | an address could not be found                                |
 | 502    | the geocoder failed                                          |
 
@@ -203,10 +210,11 @@ it.
 
 Free while the ride is `requested`, `paid` or `paid_out`. While it is
 `accepted`, the fare must be paid once using
-[x402](https://x402.org) v2 (`exact` scheme, Cardano):
+[x402](https://x402.org) v2 (`exact` scheme) on the ride's `network`:
 
 1. Without payment the server answers `402` with the requirements, both in the
-   body and base64-encoded in the `PAYMENT-REQUIRED` header:
+   body and base64-encoded in the `PAYMENT-REQUIRED` header. `accepts` holds
+   one entry, for the ride's network:
 
    ```json
    {
@@ -223,19 +231,30 @@ Free while the ride is `requested`, `paid` or `paid_out`. While it is
    }
    ```
 
-2. The rider builds and signs a transaction paying `amount` to `payTo`, and
-   retries with the `PAYMENT-SIGNATURE` header set to base64 of:
+   | Network     | `asset`    | `amount` in | `payTo`                                       |
+   | ----------- | ---------- | ----------- | --------------------------------------------- |
+   | `cardano:*` | `lovelace` | lovelace    | the ride's script address                     |
+   | `bsv:*`     | `satoshi`  | satoshis    | the ride's locking script in hex (`5221…53ae`) |
+
+2. The rider builds and signs a transaction paying `amount` to `payTo` (on
+   BSV, an output with exactly that locking script), and retries with the
+   `PAYMENT-SIGNATURE` header set to base64 of:
 
    ```json
    {
      "x402Version": 2,
      "accepted": { "…": "the entry from accepts" },
      "payload": {
-       "transaction": "<base64 signed transaction CBOR>",
-       "nonce": "<txHash>#<index of a UTxO the transaction spends>"
+       "transaction": "<base64 signed transaction>",
+       "nonce": "<an output the transaction spends>"
      }
    }
    ```
+
+   | Network     | `transaction`             | `nonce`              |
+   | ----------- | ------------------------- | -------------------- |
+   | `cardano:*` | Conway transaction CBOR   | `<txHash>#<index>`   |
+   | `bsv:*`     | raw or Extended Format    | `<txid>:<vout>`      |
 
 3. The server verifies and settles the payment through the facilitator. On
    success it answers `200` with the ride (`paid`, including `car`) and a
@@ -299,10 +318,10 @@ X-Driver-Signature: 5f3a…                   (hex)
   kiko-driver-request\n<timestamp>\n<METHOD>\n<path and query>\n<raw body>
   ```
 
-  | Chain   | Account key                    | Signature                                   |
-  | ------- | ------------------------------ | ------------------------------------------- |
-  | Cardano | CIP-1854 `m/1854'/1815'/0'`    | Ed25519 over the bytes, 64 bytes            |
-  | BSV     | `m/48'/236'/0'`                | ECDSA secp256k1 over their SHA-256, DER      |
+  | Chain   | Account key                          | Signature                               |
+  | ------- | ------------------------------------ | --------------------------------------- |
+  | Cardano | CIP-1854 `m/1854'/1815'/account'`    | Ed25519 over the bytes, 64 bytes        |
+  | BSV     | BIP-32 `m/48'/236'/account'`         | ECDSA secp256k1 over their SHA-256, DER |
 
   `<path and query>` is the request target exactly as sent, e.g.
   `/api/v1/driver/drive/available?location=52.52,13.37`. The body is the exact
