@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 
+	"kiko-backend/bsvmultisig"
 	"kiko-backend/geo"
 	"kiko-backend/multisig"
 	"kiko-backend/x402"
@@ -94,6 +95,8 @@ func (c *fakeChain) SubmitTx(tx []byte) (common.Blake2b256, error) {
 
 type env struct {
 	s           *Server
+	bsv         *bsvmultisig.Server
+	broadcaster *fakeBroadcaster
 	h           http.Handler
 	db          *sql.DB
 	chain       *fakeChain
@@ -122,9 +125,9 @@ func newMnemonic(t *testing.T) string {
 	return m
 }
 
-// signers holds every test signer by account key, so requests for a driver
-// can be signed with their key.
-var signers sync.Map
+// signers holds a message signing function for every test signer by
+// account key, so requests for a driver can be signed with their key.
+var signers sync.Map // key -> func([]byte) []byte
 
 func newSigner(t *testing.T) *multisig.Signer {
 	t.Helper()
@@ -132,19 +135,19 @@ func newSigner(t *testing.T) *multisig.Signer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signers.Store(s.AccountKey(), s)
+	signers.Store(s.AccountKey(), s.SignMessage)
 	return s
 }
 
 // signRequest signs req's method with target and body as the driver with
 // key at time at, if key belongs to a test signer.
 func signRequest(req *http.Request, key, target string, body []byte, at time.Time) {
-	signer, ok := signers.Load(normalizeKey(key))
+	sign, ok := signers.Load(normalizeKey(key))
 	if !ok {
 		return
 	}
 	ts := at.Unix()
-	sig := signer.(*multisig.Signer).SignMessage(DriverMessage(ts, req.Method, target, body))
+	sig := sign.(func([]byte) []byte)(DriverMessage(ts, req.Method, target, body))
 	req.Header.Set(HeaderDriverTimestamp, strconv.FormatInt(ts, 10))
 	req.Header.Set(HeaderDriverSignature, hex.EncodeToString(sig))
 }
@@ -179,7 +182,10 @@ func newEnv(t *testing.T) *env {
 	}
 
 	f := &fakeFacilitator{settle: x402.SettleResponse{Success: true, Transaction: "tx", Network: x402.Preprod}}
-	payments, err := x402.New(x402.Config{Network: x402.Preprod, Facilitator: f})
+	payments, err := x402.New(x402.Config{Networks: []x402.NetworkConfig{
+		{Network: x402.Preprod, Facilitator: f},
+		{Network: x402.BSVTestnet, Facilitator: f},
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,11 +195,17 @@ func newEnv(t *testing.T) *env {
 	}
 	chain := &fakeChain{FixedChainContext: fixed.NewEmptyFixedChainContext()}
 	db := newDB(t)
-	s, err := New(Config{Network: x402.Preprod, Cosigner: cosigner, DB: db, Geocoder: fakeGeocoder{}, Payments: payments, Chain: chain})
+	bsvCosigner, err := bsvmultisig.NewServer(bsvmultisig.Testnet, newMnemonic(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &env{s: s, h: s.Handler(), db: db, chain: chain, cosigner: cosigner, facilitator: f, txB64: base64.StdEncoding.EncodeToString(signed)}
+	broadcast := &fakeBroadcaster{}
+	s, err := New(Config{Network: x402.Preprod, Cosigner: cosigner, DB: db, Geocoder: fakeGeocoder{}, Payments: payments, Chain: chain,
+		BSV: &BSVConfig{Network: x402.BSVTestnet, Cosigner: bsvCosigner, Broadcaster: broadcast}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &env{s: s, bsv: bsvCosigner, broadcaster: broadcast, h: s.Handler(), db: db, chain: chain, cosigner: cosigner, facilitator: f, txB64: base64.StdEncoding.EncodeToString(signed)}
 }
 
 // do sends a request, signed as the driver with driverKey or, for
@@ -223,7 +235,7 @@ func (e *env) paid(t *testing.T, path string, accepted x402.PaymentRequirements)
 	raw, _ := json.Marshal(x402.PaymentPayload{
 		X402Version: x402.Version,
 		Accepted:    accepted,
-		Payload:     x402.CardanoPayload{Transaction: e.txB64, Nonce: hex.EncodeToString(make([]byte, 32)) + "#0"},
+		Payload:     x402.TransactionPayload{Transaction: e.txB64, Nonce: hex.EncodeToString(make([]byte, 32)) + "#0"},
 	})
 	req := httptest.NewRequest(http.MethodGet, path, nil)
 	req.Header.Set(x402.HeaderPaymentSignature, base64.StdEncoding.EncodeToString(raw))
@@ -404,7 +416,7 @@ func TestStorePersists(t *testing.T) {
 	}
 
 	db, s := open()
-	d := Driver{PublicKey: "d", BaseFee: 2_000_000, FeePerKm: 500_000, Car: Car{Brand: "VW", Model: "ID.3", Color: "white", LicensePlateNumber: "B", Year: 2021}}
+	d := Driver{PublicKey: "d", Chain: ChainCardano, BaseFee: 2_000_000, FeePerKm: 500_000, Car: Car{Brand: "VW", Model: "ID.3", Color: "white", LicensePlateNumber: "B", Year: 2021}}
 	if _, err := s.putDriver(d); err != nil {
 		t.Fatal(err)
 	}
@@ -443,7 +455,7 @@ func TestStorePersists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != StatusPaid || got.PaymentTx != "pay" || got.FareLovelace != fare(d, 3) || got.RiderKey != "r" ||
+	if got.Status != StatusPaid || got.PaymentTx != "pay" || got.Fare != fare(d, 3) || got.Chain != ChainCardano || got.RiderKey != "r" ||
 		got.Start != places["Berlin Hbf"] || !got.PickupTime.Equal(pickup) || got.PickupTime.Format(timeFormat) != pickup.Format(timeFormat) {
 		t.Fatalf("unexpected ride: %+v", got)
 	}
@@ -504,7 +516,8 @@ func TestRideAddressCosigners(t *testing.T) {
 	rider := newSigner(t)
 
 	custodial := e.createRide(t)
-	withKey := e.createRideWithKey(t, rider.AccountKey())
+	riderKey, _ := rider.Key(5)
+	withKey := e.createRideWithKey(t, riderKey)
 	if !custodial.Custodial || withKey.Custodial {
 		t.Fatalf("custodial flags wrong: %v, %v", custodial.Custodial, withKey.Custodial)
 	}
@@ -529,7 +542,7 @@ func TestRideAddressCosigners(t *testing.T) {
 	if got.AddressIndex == nil || *got.AddressIndex != 2 {
 		t.Fatalf("ride has index %v, want 2", got.AddressIndex)
 	}
-	if want := e.rideAddress(t, d.PublicKey, rider.AccountKey(), 2); got.PayTo != want {
+	if want := e.rideAddress(t, d.PublicKey, riderKey, 2); got.PayTo != want {
 		t.Fatalf("ride pays to %s, want server+driver+rider %s", got.PayTo, want)
 	}
 }
@@ -541,17 +554,22 @@ func TestCosignerKeyValidation(t *testing.T) {
 		rec := e.do(t, http.MethodPost, "/api/v1/driver", "", map[string]any{"public_key": key, "car": car})
 		expect(t, rec, http.StatusBadRequest)
 	}
-	rec := e.do(t, http.MethodPost, "/api/v1/ride", "", map[string]string{
-		"start_address": "Berlin Hbf",
-		"end_address":   "Alexanderplatz",
-		"pickup_time":   "2026-11-01T09:00:00Z",
-		"cosigner_key":  e.cosigner.AccountKey(),
-	})
-	expect(t, rec, http.StatusBadRequest)
+	// Riders give a key for the ride, never an account key.
+	for _, key := range []string{e.cosigner.AccountKey(), newSigner(t).AccountKey(), "addr_shared_vk1qqqq"} {
+		rec := e.do(t, http.MethodPost, "/api/v1/ride", "", map[string]string{
+			"start_address": "Berlin Hbf",
+			"end_address":   "Alexanderplatz",
+			"pickup_time":   "2026-11-01T09:00:00Z",
+			"cosigner_key":  key,
+		})
+		expect(t, rec, http.StatusBadRequest)
+	}
 
-	// A driver cannot take a ride whose rider uses the driver's own key.
-	shared := newSigner(t).AccountKey()
-	d := e.registerDriverWithKey(t, shared)
+	// A driver cannot take a ride whose rider uses the driver's own key at
+	// the ride's index, the first one.
+	driver := newSigner(t)
+	d := e.registerDriverWithKey(t, driver.AccountKey())
+	shared, _ := driver.Key(1)
 	ride := e.createRideWithKey(t, shared)
 	expect(t, e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, d.PublicKey, map[string]any{}), http.StatusUnprocessableEntity)
 }
@@ -675,7 +693,7 @@ func TestDriverPayout(t *testing.T) {
 		d := e.registerDriverWithKey(t, driver.AccountKey())
 		riderKey := ""
 		if !custodial {
-			riderKey = newSigner(t).AccountKey()
+			riderKey, _ = newSigner(t).Key(3)
 		}
 		ride := e.createRideWithKey(t, riderKey)
 		acc := e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, d.PublicKey, map[string]any{"eta_minutes": 3})
@@ -823,4 +841,44 @@ func TestDriverSignature(t *testing.T) {
 	rec := httptest.NewRecorder()
 	e.h.ServeHTTP(rec, req)
 	expect(t, rec, http.StatusUnauthorized)
+}
+
+// TestMigrateCardanoOnlyDB upgrades a database from before BSV support.
+func TestMigrateCardanoOnlyDB(t *testing.T) {
+	db := newDB(t)
+	if _, err := db.Exec(`
+CREATE TABLE drivers (public_key TEXT PRIMARY KEY, base_fee INTEGER NOT NULL, fee_per_km INTEGER NOT NULL,
+	car_brand TEXT NOT NULL, car_model TEXT NOT NULL, car_color TEXT NOT NULL,
+	car_license_plate_number TEXT NOT NULL, car_year INTEGER NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE rides (address_index INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, status TEXT NOT NULL,
+	start_address TEXT NOT NULL, end_address TEXT NOT NULL, start_lat REAL NOT NULL, start_lng REAL NOT NULL,
+	end_lat REAL NOT NULL, end_lng REAL NOT NULL, distance_km REAL NOT NULL, pickup_time TEXT NOT NULL,
+	created_at TEXT NOT NULL, rider_key TEXT NOT NULL DEFAULT '', pay_to TEXT NOT NULL DEFAULT '',
+	script TEXT NOT NULL DEFAULT '', driver_key TEXT NOT NULL DEFAULT '', eta_minutes INTEGER NOT NULL DEFAULT 0,
+	eta_km REAL NOT NULL DEFAULT 0, fare_lovelace INTEGER NOT NULL DEFAULT 0, payment_tx TEXT NOT NULL DEFAULT '',
+	payout_tx TEXT NOT NULL DEFAULT '', claim_tx TEXT NOT NULL DEFAULT '', paying_out INTEGER NOT NULL DEFAULT 0);
+INSERT INTO drivers VALUES ('d', 2000000, 500000, 'VW', 'ID.3', 'white', 'B', 2021, '2026-01-01T00:00:00Z');
+INSERT INTO rides (id, status, start_address, end_address, start_lat, start_lng, end_lat, end_lng, distance_km,
+	pickup_time, created_at, driver_key, fare_lovelace)
+	VALUES ('accepted', 'accepted', 'a', 'b', 0, 0, 0, 0, 1, '2026-11-01T09:00:00Z', '2026-11-01T08:00:00Z', 'd', 2500000),
+	       ('requested', 'requested', 'a', 'b', 0, 0, 0, 0, 1, '2026-11-01T09:00:00Z', '2026-11-01T08:00:00Z', '', 0);
+`); err != nil {
+		t.Fatal(err)
+	}
+	s, err := newStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, err := s.driver("d"); err != nil || d.Chain != ChainCardano {
+		t.Fatalf("driver %+v, %v", d, err)
+	}
+	if r, err := s.ride("accepted"); err != nil || r.Chain != ChainCardano || r.Fare != 2_500_000 {
+		t.Fatalf("accepted ride %+v, %v", r, err)
+	}
+	if r, err := s.ride("requested"); err != nil || r.Chain != "" {
+		t.Fatalf("requested ride %+v, %v", r, err)
+	}
+	if _, err := newStore(db); err != nil {
+		t.Fatal("migrating twice:", err)
+	}
 }

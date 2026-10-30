@@ -27,10 +27,14 @@ type rideView struct {
 	// holds two of the ride address's three keys.
 	Custodial bool `json:"custodial"`
 
-	FareLovelace uint64   `json:"fare_lovelace,omitempty"`
-	PayTo        string   `json:"pay_to,omitempty"`
-	EtaMinutes   *int     `json:"eta_minutes,omitempty"`
-	EtaKm        *float64 `json:"eta_km,omitempty"`
+	// Network is where the fare is paid; Fare is in its smallest unit.
+	// FareLovelace repeats a Cardano fare for older clients.
+	Network      x402.Network `json:"network,omitempty"`
+	Fare         uint64       `json:"fare,omitempty"`
+	FareLovelace uint64       `json:"fare_lovelace,omitempty"`
+	PayTo        string       `json:"pay_to,omitempty"`
+	EtaMinutes   *int         `json:"eta_minutes,omitempty"`
+	EtaKm        *float64     `json:"eta_km,omitempty"`
 	// Car is the driver's car, so the rider can find it.
 	Car       *Car   `json:"car,omitempty"`
 	PaymentTx string `json:"payment_tx,omitempty"`
@@ -54,11 +58,14 @@ func (s *Server) view(r Ride, forDriver bool) rideView {
 		DistanceKm:   r.DistanceKm,
 		PickupTime:   r.PickupTime.Format(timeFormat),
 		Custodial:    r.RiderKey == "",
-		FareLovelace: r.FareLovelace,
 		PaymentTx:    r.PaymentTx,
 	}
 	if r.Status == StatusRequested {
 		return v
+	}
+	v.Network, v.Fare = s.network(r.Chain), r.Fare
+	if r.Chain == ChainCardano {
+		v.FareLovelace = r.Fare
 	}
 	v.PayTo = r.PayTo
 	if forDriver {
@@ -128,17 +135,22 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 }
 
 type fareRange struct {
-	Min uint64 `json:"min"`
-	Max uint64 `json:"max"`
+	Network x402.Network `json:"network,omitempty"`
+	Min     uint64       `json:"min"`
+	Max     uint64       `json:"max"`
 }
 
 type quote struct {
-	StartAddress string     `json:"start_address"`
-	EndAddress   string     `json:"end_address"`
-	Start        geo.Point  `json:"start"`
-	End          geo.Point  `json:"end"`
-	DistanceKm   float64    `json:"distance_km"`
-	FareLovelace *fareRange `json:"fare_lovelace,omitempty"` // over registered drivers
+	StartAddress string    `json:"start_address"`
+	EndAddress   string    `json:"end_address"`
+	Start        geo.Point `json:"start"`
+	End          geo.Point `json:"end"`
+	DistanceKm   float64   `json:"distance_km"`
+	// Fares ranges over the registered drivers of each network, in its
+	// smallest unit. FareLovelace repeats the Cardano range for older
+	// clients.
+	Fares        []fareRange `json:"fares"`
+	FareLovelace *fareRange  `json:"fare_lovelace,omitempty"`
 }
 
 func (s *Server) quoteRide(w http.ResponseWriter, r *http.Request) {
@@ -162,19 +174,31 @@ func (s *Server) quoteRide(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	q := quote{StartAddress: startAddr, EndAddress: endAddr, Start: start, End: end, DistanceKm: geo.Distance(start, end)}
+	q := quote{StartAddress: startAddr, EndAddress: endAddr, Start: start, End: end, DistanceKm: geo.Distance(start, end), Fares: []fareRange{}}
 	drivers, err := s.store.allDrivers()
 	if err != nil {
 		s.storeError(w, "all drivers", err)
 		return
 	}
-	for _, d := range drivers {
-		f := fare(d, q.DistanceKm)
-		if q.FareLovelace == nil {
-			q.FareLovelace = &fareRange{Min: f, Max: f}
+	for _, chain := range []Chain{ChainCardano, ChainBSV} {
+		var fr *fareRange
+		for _, d := range drivers {
+			if d.Chain != chain {
+				continue
+			}
+			f := fare(d, q.DistanceKm)
+			if fr == nil {
+				fr = &fareRange{Network: s.network(chain), Min: f, Max: f}
+			}
+			fr.Min, fr.Max = min(fr.Min, f), max(fr.Max, f)
 		}
-		q.FareLovelace.Min = min(q.FareLovelace.Min, f)
-		q.FareLovelace.Max = max(q.FareLovelace.Max, f)
+		if fr == nil {
+			continue
+		}
+		q.Fares = append(q.Fares, *fr)
+		if chain == ChainCardano {
+			q.FareLovelace = &fareRange{Min: fr.Min, Max: fr.Max}
+		}
 	}
 	writeJSON(w, http.StatusOK, q)
 }
@@ -183,8 +207,10 @@ type createRideRequest struct {
 	StartAddress string    `json:"start_address"`
 	EndAddress   string    `json:"end_address"`
 	PickupTime   time.Time `json:"pickup_time"`
-	// CosignerKey is the rider's optional "acct_shared_xvk". Without it the
-	// server cosigns in the rider's place.
+	// CosignerKey is the rider's optional public key for this ride, a
+	// Cardano "addr_shared_vk" or a BSV compressed public key in hex, and
+	// only drivers of that chain can take the ride. Without it the server
+	// cosigns in the rider's place and drivers of any chain can.
 	CosignerKey string `json:"cosigner_key,omitempty"`
 	// Start and End, when given, are used instead of geocoding the
 	// addresses, which then only label the ride.
@@ -207,10 +233,12 @@ func (s *Server) createRide(w http.ResponseWriter, r *http.Request) {
 	}
 	req.CosignerKey = strings.TrimSpace(req.CosignerKey)
 	if req.CosignerKey != "" {
-		if err := s.cfg.Cosigner.CheckCosignerKey(req.CosignerKey); err != nil {
+		_, key, err := s.checkRiderKey(req.CosignerKey)
+		if err != nil {
 			writeError(w, http.StatusBadRequest, "cosigner_key: "+err.Error())
 			return
 		}
+		req.CosignerKey = key
 	}
 	start, end, ok := s.geocodeRoute(r.Context(), w, req.StartAddress, req.EndAddress, req.Start, req.End)
 	if !ok {
@@ -252,13 +280,14 @@ func (s *Server) getRide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	price := func(*http.Request) (x402.Price, error) {
-		return x402.Price{
+	price := func(*http.Request) ([]x402.Price, error) {
+		return []x402.Price{{
+			Network:     s.network(ride.Chain),
 			PayTo:       ride.PayTo,
-			Amount:      ride.FareLovelace,
+			Amount:      ride.Fare,
 			Description: "Kiko ride " + ride.ID,
 			MimeType:    "application/json",
-		}, nil
+		}}, nil
 	}
 	// The middleware runs this after verifying the payment and settles only
 	// if it succeeds, so a ride already being paid by another transaction
@@ -285,7 +314,7 @@ func (s *Server) getRide(w http.ResponseWriter, r *http.Request) {
 	if claimedTx != "" {
 		// The middleware answers 200 only after settlement succeeded.
 		if sw.status == http.StatusOK {
-			s.log.Info("ride paid", "ride", id, "tx", claimedTx, "fare", ride.FareLovelace)
+			s.log.Info("ride paid", "ride", id, "tx", claimedTx, "chain", ride.Chain, "fare", ride.Fare)
 		} else {
 			s.log.Warn("ride payment not settled", "ride", id, "tx", claimedTx, "status", sw.status)
 		}

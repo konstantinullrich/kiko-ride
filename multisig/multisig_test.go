@@ -305,34 +305,66 @@ func ridePayment(t *testing.T, w *Wallet) *Proposal {
 	return p
 }
 
-func TestServerWithRiderKey(t *testing.T) {
+func TestServerRejectsRiderAccountKey(t *testing.T) {
 	server, driver, rider := newServer(t), newSigner(t), newSigner(t)
-	w, custodial, err := server.RideWallet(driver.AccountKey(), rider.AccountKey())
+	if _, _, err := server.RideWallet(driver.AccountKey(), rider.AccountKey()); err == nil {
+		t.Fatal("accepted an account key as the rider's key")
+	}
+}
+
+func TestServerWithPerRideRiderKey(t *testing.T) {
+	server, driver, rider := newServer(t), newSigner(t), newSigner(t)
+	// The rider's key comes from their own wallet, at an index of their
+	// choosing, unrelated to the ride's.
+	riderKey, err := rider.Key(9)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if custodial {
-		t.Fatal("wallet with a rider key reported custodial")
+	w, custodial, err := server.RideWallet(driver.AccountKey(), riderKey)
+	if err != nil || custodial {
+		t.Fatalf("rider key wallet: custodial %v, %v", custodial, err)
 	}
 	p := ridePayment(t, w)
+	addr, _ := w.Address(p.Indexes[0])
+	riderPriv, _ := rider.paymentKey(9)
+	if !slices.Contains(addr.KeyHashes[:], common.Blake2b224Hash(riderPriv.PublicKey())) {
+		t.Fatal("ride address does not hold the rider's key")
+	}
 
 	serverWits, err := server.Sign(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(serverWits) != 1 {
-		t.Fatalf("server should sign once, got %d witnesses", len(serverWits))
-	}
 	if _, err := w.Assemble(p, serverWits...); err == nil {
-		t.Fatal("server alone spent a non-custodial ride")
+		t.Fatal("server alone spent a ride with a rider key")
 	}
-	for _, other := range []*Signer{driver, rider} {
-		if _, err := w.Assemble(p, append(serverWits, sign(t, p, other)...)...); err != nil {
+	txID, _ := p.TxID()
+	riderWit := common.VkeyWitness{Vkey: riderPriv.PublicKey(), Signature: riderPriv.Sign(txID.Bytes())}
+	for _, wits := range [][]common.VkeyWitness{
+		append(serverWits, riderWit),
+		append(sign(t, p, driver), riderWit),
+		append(serverWits, sign(t, p, driver)...),
+	} {
+		if _, err := w.Assemble(p, wits...); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := w.Assemble(p, sign(t, p, driver, rider)...); err != nil {
-		t.Fatal(err)
+
+	// The rider cannot use a key the server or driver holds at the index.
+	backupKey, _ := server.backup.Key(500)
+	driverKey, _ := driver.Key(500)
+	primaryKey, _ := server.primary.Key(500)
+	for _, key := range []string{backupKey, driverKey, primaryKey} {
+		w, _, err := server.RideWallet(driver.AccountKey(), key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Address(500); err == nil {
+			t.Fatalf("accepted %s as the rider's key at its own index", key)
+		}
+	}
+	if _, _, err := server.RideWallet(driver.AccountKey(), "addr_shared_vk1qqqq"); err == nil {
+		t.Fatal("accepted an invalid rider key")
 	}
 }
 
@@ -396,7 +428,8 @@ func partiallySigned(t *testing.T, p *Proposal, signers ...*Signer) []byte {
 
 func TestServerCosignsDriverPayout(t *testing.T) {
 	server, driver, rider := newServer(t), newSigner(t), newSigner(t)
-	for _, riderKey := range []string{rider.AccountKey(), ""} {
+	perRide, _ := rider.Key(9)
+	for _, riderKey := range []string{perRide, ""} {
 		w, _, err := server.RideWallet(driver.AccountKey(), riderKey)
 		if err != nil {
 			t.Fatal(err)
@@ -409,7 +442,14 @@ func TestServerCosignsDriverPayout(t *testing.T) {
 			t.Fatalf("cosigned an unsigned transaction: %v", err)
 		}
 		if riderKey != "" {
-			if _, _, err := server.Cosign(w, index, driver.AccountKey(), partiallySigned(t, p, rider)); !errors.Is(err, ErrMissingSignature) {
+			// Signed by the rider's per-ride key only.
+			priv, _ := rider.paymentKey(9)
+			raw, _ := hex.DecodeString(p.TxCbor)
+			riderOnly, err := replaceVkeyWitnesses(raw, []common.VkeyWitness{{Vkey: priv.PublicKey(), Signature: priv.Sign(wantID.Bytes())}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := server.Cosign(w, index, driver.AccountKey(), riderOnly); !errors.Is(err, ErrMissingSignature) {
 				t.Fatalf("cosigned without the driver: %v", err)
 			}
 		}
@@ -465,7 +505,8 @@ func TestServerSweepsCustodialRide(t *testing.T) {
 	addr, _ := w.Address(index)
 	addUtxo(fc, addr.Address, 10_000_000, 1)
 	addUtxo(fc, addr.Address, 3_000_000, 2)
-	other, _, err := server.RideWallet(driver.AccountKey(), newSigner(t).AccountKey())
+	otherKey, _ := newSigner(t).Key(0)
+	other, _, err := server.RideWallet(driver.AccountKey(), otherKey)
 	if err != nil {
 		t.Fatal(err)
 	}

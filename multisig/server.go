@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/blinklabs-io/bursa/bip32"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -78,23 +79,26 @@ func (s *Server) CheckCosignerKey(key string) error {
 }
 
 // RideWallet returns the 2-of-3 wallet of the server, the driver and the
-// rider. If riderKey is empty the server's backup key takes the rider's
-// place and custodial is true: the server then controls two of the three
-// keys.
+// rider. riderKey is the rider's own "addr_shared_vk" for the ride, used at
+// every index as is. If riderKey is empty the server's backup key takes the
+// rider's place and custodial is true: the server then controls two of the
+// three keys.
 func (s *Server) RideWallet(driverKey, riderKey string) (w *Wallet, custodial bool, err error) {
 	if err := s.CheckCosignerKey(driverKey); err != nil {
 		return nil, false, fmt.Errorf("driver key: %w", err)
 	}
 	if riderKey == "" {
-		riderKey, custodial = s.backup.AccountKey(), true
-	} else if err := s.CheckCosignerKey(riderKey); err != nil {
+		w, err = NewWallet(s.network, s.primary.AccountKey(), driverKey, s.backup.AccountKey())
+		return w, true, err
+	}
+	w, err = NewKeyWallet(s.network, s.primary.AccountKey(), driverKey, riderKey)
+	if err != nil {
 		return nil, false, fmt.Errorf("rider key: %w", err)
 	}
-	w, err = NewWallet(s.network, s.primary.AccountKey(), driverKey, riderKey)
-	if err != nil {
-		return nil, false, err
-	}
-	return w, custodial, nil
+	// A rider key equal to the backup key would hand the server a second key
+	// on the ride.
+	w.exclude = []bip32.XPub{s.backup.account.Public()}
+	return w, false, nil
 }
 
 // Sign returns the server's witnesses for a proposal from a ride wallet: the

@@ -12,8 +12,10 @@ import (
 	"github.com/Salvionied/apollo/v2/backend"
 	"github.com/Salvionied/apollo/v2/backend/koios"
 	"github.com/Salvionied/apollo/v2/constants"
+	"github.com/bsv-blockchain/go-sdk/transaction/broadcaster"
 
 	"kiko-backend/api"
+	"kiko-backend/bsvmultisig"
 	"kiko-backend/geo"
 	"kiko-backend/multisig"
 	"kiko-backend/x402"
@@ -33,6 +35,10 @@ const cfPreprodFacilitator = "https://x402.preprod.dev.ecosyseng.cf-deployments.
 //	MAPBOX_PERMANENT           "true" for permanent geocoding (needed to store results)
 //	KOIOS_URL                  Koios base URL for submitting payouts (defaults to the public instance for the network)
 //	KOIOS_API_TOKEN            optional Koios bearer token; the public tier is used when unset
+//	BSV_FACILITATOR_URL        x402 facilitator for BSV fares; set it (and BSV_ARC_URL) to accept BSV drivers
+//	BSV_ARC_URL, BSV_ARC_API_KEY  ARC endpoint (and optional key) for submitting BSV payouts
+//
+// BSV runs on mainnet when CARDANO_NETWORK is mainnet, otherwise on testnet.
 func main() {
 	if err := run(); err != nil {
 		slog.Error("kiko-backend", "err", err)
@@ -54,13 +60,15 @@ func run() error {
 		}
 		facilitatorURL = cfPreprodFacilitator
 	}
-	payments, err := x402.New(x402.Config{
-		Network: network,
-		Facilitator: &x402.HTTPFacilitator{
-			URL:    facilitatorURL,
-			Client: &http.Client{Timeout: 3 * time.Minute}, // settlement waits for confirmations
-		},
-	})
+	networks := []x402.NetworkConfig{{Network: network, Facilitator: facilitator(facilitatorURL)}}
+	bsv, err := bsvConfig(network)
+	if err != nil {
+		return err
+	}
+	if bsv != nil {
+		networks = append(networks, x402.NetworkConfig{Network: bsv.Network, Facilitator: facilitator(os.Getenv("BSV_FACILITATOR_URL"))})
+	}
+	payments, err := x402.New(x402.Config{Networks: networks})
 	if err != nil {
 		return err
 	}
@@ -98,6 +106,7 @@ func run() error {
 		Geocoder: geocoder,
 		Payments: payments,
 		Chain:    chain,
+		BSV:      bsv,
 	})
 	if err != nil {
 		return err
@@ -115,7 +124,7 @@ func run() error {
 		// Paid requests wait for settlement, which can take minutes.
 		WriteTimeout: 4 * time.Minute,
 	}
-	slog.Info("listening", "addr", addr, "network", network, "db", dbPath, "facilitator", facilitatorURL,
+	slog.Info("listening", "addr", addr, "network", network, "bsv", bsv != nil, "db", dbPath, "facilitator", facilitatorURL,
 		"koios", koiosURL, "cosigner", cosigner.AccountKey())
 	return srv.ListenAndServe()
 }
@@ -138,6 +147,36 @@ func chainContext(network string, walletNetwork multisig.Network) (backend.Chain
 		}
 	}
 	return koios.NewKoiosChainContext(url, uint8(walletNetwork), os.Getenv("KOIOS_API_TOKEN")), url, nil
+}
+
+// bsvConfig enables BSV drivers when BSV_FACILITATOR_URL is set, on mainnet
+// alongside Cardano mainnet and on testnet otherwise.
+func bsvConfig(cardano x402.Network) (*api.BSVConfig, error) {
+	if os.Getenv("BSV_FACILITATOR_URL") == "" {
+		return nil, nil
+	}
+	arcURL := os.Getenv("BSV_ARC_URL")
+	if arcURL == "" {
+		return nil, errors.New("BSV_ARC_URL is required with BSV_FACILITATOR_URL")
+	}
+	network, walletNetwork := x402.BSVTestnet, bsvmultisig.Testnet
+	if cardano == x402.Mainnet {
+		network, walletNetwork = x402.BSVMainnet, bsvmultisig.Mainnet
+	}
+	cosigner, err := bsvmultisig.NewServer(walletNetwork, os.Getenv("KIKO_SERVER_MNEMONIC"))
+	if err != nil {
+		return nil, fmt.Errorf("KIKO_SERVER_MNEMONIC: %w", err)
+	}
+	return &api.BSVConfig{
+		Network:     network,
+		Cosigner:    cosigner,
+		Broadcaster: &broadcaster.Arc{ApiUrl: arcURL, ApiKey: os.Getenv("BSV_ARC_API_KEY"), Client: &http.Client{Timeout: time.Minute}},
+	}, nil
+}
+
+func facilitator(url string) *x402.HTTPFacilitator {
+	// Settlement waits for confirmations, which can take minutes.
+	return &x402.HTTPFacilitator{URL: url, Client: &http.Client{Timeout: 3 * time.Minute}}
 }
 
 func envOr(key, def string) string {

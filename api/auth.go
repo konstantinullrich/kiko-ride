@@ -9,12 +9,14 @@ import (
 	"strings"
 	"time"
 
+	"kiko-backend/bsvmultisig"
 	"kiko-backend/multisig"
 )
 
 const (
-	// HeaderDriverSignature carries the hex Ed25519 signature of
-	// DriverMessage by the driver's account key.
+	// HeaderDriverSignature carries the hex signature of DriverMessage by
+	// the driver's account key: Ed25519 for Cardano keys, DER ECDSA over its
+	// SHA-256 for BSV keys.
 	HeaderDriverSignature = "X-Driver-Signature"
 	// HeaderDriverTimestamp carries the Unix time in seconds the request was
 	// signed at.
@@ -48,6 +50,22 @@ func readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 	return body, true
 }
 
+// verifyMessage checks sig over msg by key, with the scheme of the key's
+// chain: Ed25519 on Cardano, ECDSA over SHA-256 on BSV.
+func (s *Server) verifyMessage(key string, msg, sig []byte) error {
+	chain, key, err := parseKey(key)
+	if err != nil {
+		return err
+	}
+	if chain == ChainBSV {
+		if s.cfg.BSV == nil {
+			return errChainDisabled
+		}
+		return bsvmultisig.VerifyMessage(s.cfg.BSV.Cosigner.Network(), key, msg, sig)
+	}
+	return multisig.VerifyMessage(key, msg, sig)
+}
+
 // checkSignature verifies the request's X-Driver-Signature by key over
 // DriverMessage, writing 401 if it is missing, stale or wrong.
 func (s *Server) checkSignature(w http.ResponseWriter, r *http.Request, key string, body []byte) bool {
@@ -71,7 +89,7 @@ func (s *Server) checkSignature(w http.ResponseWriter, r *http.Request, key stri
 	if target == "" {
 		target = r.URL.RequestURI()
 	}
-	if err := multisig.VerifyMessage(key, DriverMessage(ts, r.Method, target, body), sig); err != nil {
+	if err := s.verifyMessage(key, DriverMessage(ts, r.Method, target, body), sig); err != nil {
 		return fail(HeaderDriverSignature + " does not verify against the driver's key")
 	}
 	return true

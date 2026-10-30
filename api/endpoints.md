@@ -6,7 +6,10 @@ All endpoints are under `/api/v1`, take and return JSON, and report errors as
 { "error": "human readable message" }
 ```
 
-Amounts are in **lovelace** (1 ADA = 1,000,000 lovelace). Times are RFC 3339.
+Each driver is paid on the chain their public key belongs to: a Cardano
+`acct_shared_xvk1…` key means fares in **lovelace** (1 ADA = 1,000,000
+lovelace), a BSV `xpub…`/`tpub…` key fares in **satoshis**. BSV is available
+only when the server enables it. Times are RFC 3339.
 Coordinates are `{ "lat": 52.52, "lng": 13.37 }`. State is kept in SQLite.
 
 ## Ride lifecycle
@@ -28,18 +31,27 @@ requested ──(driver accepts)──> accepted ──(rider pays via x402)─�
 
 ### Ride address (2-of-3 multisig)
 
-Each ride is paid to its own native-script address that any two of three keys
+Each ride is paid to its own 2-of-3 multisig output that any two of three keys
 can spend:
 
 | Key    | Source                                                             |
 | ------ | ------------------------------------------------------------------ |
-| Server | Kiko's server key                                                  |
-| Driver | The driver's `public_key`                                          |
-| Rider  | The rider's `cosigner_key`, or a second server key if none is given |
+| Server | Kiko's server key, account `0'` of the server mnemonic             |
+| Driver | The driver's `public_key`, any account                             |
+| Rider  | The rider's `cosigner_key`, a public key for this ride used as is; or, if none is given, the server's fallback key, account `1'` |
 
-All keys are CIP-1854 account keys (`acct_shared_xvk1…`); each party's key for
-a ride is derived at the ride's `address_index` (role 0). If the rider gives no
-key the ride is `custodial` and the server holds two of the three keys.
+The server and driver keys are account keys on the driver's chain, derived
+for each ride at its `address_index` (role 0). The rider's key is not
+derived: the rider checks it appears in `pay_to` before paying, and needs no
+index to sign with it later.
+
+| Chain   | Server and driver account keys                  | Their ride key                           | Rider key                     | Locked by |
+| ------- | ----------------------------------------------- | ---------------------------------------- | ----------------------------- | --------- |
+| Cardano | CIP-1854 `acct_shared_xvk1…`                    | `m/1854'/1815'/account'/0/address_index` | `addr_shared_vk1…` (or `addr_shared_xvk1…`) | native script `atLeast 2`, at its script address (`addr1w…`/`addr_test1w…`) |
+| BSV     | BIP-32 `xpub…`/`tpub…` at `m/48'/236'/account'` | `m/48'/236'/account'/0/address_index`    | compressed public key, 33 bytes hex (`02…`/`03…`) | bare `OP_2 <keys> OP_3 OP_CHECKMULTISIG` output, keys sorted (BIP-67); it has no address |
+
+If the rider gives no key the ride is `custodial` and the server holds two of
+the three keys.
 
 ## Ride object
 
@@ -57,6 +69,8 @@ Returned by every ride endpoint. Fields appear as the ride progresses.
   "pickup_time": "2026-11-01T09:00:00Z",
   "custodial": false,
 
+  "network": "cardano:preprod",
+  "fare": 3505000,
   "fare_lovelace": 3505000,
   "pay_to": "addr_test1w…",
   "eta_minutes": 4,
@@ -79,15 +93,21 @@ Returned by every ride endpoint. Fields appear as the ride progresses.
 | Field                         | Shown                                            |
 | ----------------------------- | ------------------------------------------------ |
 | `id` … `custodial`            | always                                           |
-| `fare_lovelace`, `pay_to`     | from `accepted`                                  |
+| `network`, `fare`, `pay_to`   | from `accepted`                                  |
+| `fare_lovelace`               | from `accepted`, Cardano rides only              |
 | `eta_minutes`, `eta_km`, `car` | to the driver from `accepted`; to the rider from `paid` |
 | `payment_tx`                  | from `paid`                                      |
 | `address_index`, `script`     | driver only, from `accepted`                     |
 | `payout_tx`                   | driver only, from `paid_out`                     |
 
 - `custodial`: `true` when the rider gave no `cosigner_key`.
-- `script`: hex CBOR of the native script locking `pay_to`. The driver attaches
-  it to the payout transaction.
+- `network`: where the fare is paid, the accepting driver's chain
+  (`cardano:*` or `bsv:*`); `fare` is in its smallest unit. `fare_lovelace`
+  repeats a Cardano fare for older clients.
+- `script`: on Cardano, hex CBOR of the native script locking `pay_to`, which
+  the driver attaches to the payout transaction. On BSV the ride is locked by
+  a bare 2-of-3 multisig output, which has no address: `pay_to` and `script`
+  are both its hex locking script.
 - `distance_km` is the straight-line distance between start and end.
 
 The driver's public key is never shown to the rider.
@@ -114,12 +134,17 @@ Query parameters:
   "start": { "lat": 52.5251, "lng": 13.3694 },
   "end": { "lat": 52.5219, "lng": 13.4132 },
   "distance_km": 3.01,
+  "fares": [
+    { "network": "cardano:preprod", "min": 3505000, "max": 4200000 },
+    { "network": "bsv:testnet", "min": 35000, "max": 35000 }
+  ],
   "fare_lovelace": { "min": 3505000, "max": 4200000 }
 }
 ```
 
-`fare_lovelace` is the range over all registered drivers and is omitted when
-none are registered.
+`fares` holds the range over the registered drivers of each network, in its
+smallest unit, and leaves out networks without drivers. `fare_lovelace`
+repeats the Cardano range for older clients.
 
 | Status | When                                   |
 | ------ | -------------------------------------- |
@@ -162,7 +187,7 @@ Query parameters:
   "start_address": "Berlin Hbf",
   "end_address": "Alexanderplatz",
   "pickup_time": "2026-11-01T09:00:00Z",
-  "cosigner_key": "acct_shared_xvk1…",
+  "cosigner_key": "addr_shared_vk1…",
   "start": { "lat": 52.5251, "lng": 13.3694 },
   "end": { "lat": 52.5219, "lng": 13.4132 }
 }
@@ -171,13 +196,17 @@ Query parameters:
 `start` and `end` are optional. Each one given is used instead of geocoding
 its address, which then only labels the ride.
 
-`cosigner_key` is optional. Without it the server takes the rider's place in
-the ride address and the ride is `custodial`.
+`cosigner_key` is optional: the rider's public key for this ride, a Cardano
+`addr_shared_vk1…` or a BSV compressed public key in hex. Account keys are
+refused. Use a fresh key for every ride; a reused key links the rides on
+chain. A Cardano key ties the ride to Cardano drivers, a BSV key to BSV
+drivers. Without it the server takes the rider's place in the ride address,
+the ride is `custodial`, and drivers on either chain can take it.
 
 | Status | When                                                         |
 | ------ | ------------------------------------------------------------ |
 | 201    | created; body is the ride (`requested`)                      |
-| 400    | missing fields, bad JSON, invalid `start`/`end`, or an invalid or server-owned `cosigner_key` |
+| 400    | missing fields, bad JSON, invalid `start`/`end`, a `cosigner_key` that is not a valid per-ride key (account keys included), or a BSV key while BSV is off |
 | 422    | an address could not be found                                |
 | 502    | the geocoder failed                                          |
 
@@ -185,10 +214,11 @@ the ride address and the ride is `custodial`.
 
 Free while the ride is `requested`, `paid` or `paid_out`. While it is
 `accepted`, the fare must be paid once using
-[x402](https://x402.org) v2 (`exact` scheme, Cardano):
+[x402](https://x402.org) v2 (`exact` scheme) on the ride's `network`:
 
 1. Without payment the server answers `402` with the requirements, both in the
-   body and base64-encoded in the `PAYMENT-REQUIRED` header:
+   body and base64-encoded in the `PAYMENT-REQUIRED` header. `accepts` holds
+   one entry, for the ride's network:
 
    ```json
    {
@@ -205,19 +235,30 @@ Free while the ride is `requested`, `paid` or `paid_out`. While it is
    }
    ```
 
-2. The rider builds and signs a transaction paying `amount` to `payTo`, and
-   retries with the `PAYMENT-SIGNATURE` header set to base64 of:
+   | Network     | `asset`    | `amount` in | `payTo`                                       |
+   | ----------- | ---------- | ----------- | --------------------------------------------- |
+   | `cardano:*` | `lovelace` | lovelace    | the ride's script address                     |
+   | `bsv:*`     | `satoshi`  | satoshis    | the ride's locking script in hex (`5221…53ae`) |
+
+2. The rider builds and signs a transaction paying `amount` to `payTo` (on
+   BSV, an output with exactly that locking script), and retries with the
+   `PAYMENT-SIGNATURE` header set to base64 of:
 
    ```json
    {
      "x402Version": 2,
      "accepted": { "…": "the entry from accepts" },
      "payload": {
-       "transaction": "<base64 signed transaction CBOR>",
-       "nonce": "<txHash>#<index of a UTxO the transaction spends>"
+       "transaction": "<base64 signed transaction>",
+       "nonce": "<an output the transaction spends>"
      }
    }
    ```
+
+   | Network     | `transaction`             | `nonce`              |
+   | ----------- | ------------------------- | -------------------- |
+   | `cardano:*` | Conway transaction CBOR   | `<txHash>#<index>`   |
+   | `bsv:*`     | raw or Extended Format    | `<txid>:<vout>`      |
 
 3. The server verifies and settles the payment through the facilitator. On
    success it answers `200` with the ride (`paid`, including `car`) and a
@@ -267,25 +308,30 @@ Drivers are identified by their public key, and every driver request,
 registration included, is signed with the matching private key:
 
 ```
-X-Driver-Key: acct_shared_xvk1…      (not on registration)
+X-Driver-Key: acct_shared_xvk1… or xpub…   (not on registration)
 X-Driver-Timestamp: 1793386002
-X-Driver-Signature: 5f3a…            (hex, 64 bytes)
+X-Driver-Signature: 5f3a…                   (hex)
 ```
 
 - `X-Driver-Timestamp` is the Unix time in seconds. It must be within 30
   seconds of the server's clock, in either direction.
-- `X-Driver-Signature` is the Ed25519 signature, made with the CIP-1854
-  account private key (`m/1854'/1815'/0'`, the key behind `public_key`
-  itself, not one derived from it), over these bytes:
+- `X-Driver-Signature` is made with the account private key behind
+  `public_key` itself, not one derived from it, over these bytes:
 
   ```
   kiko-driver-request\n<timestamp>\n<METHOD>\n<path and query>\n<raw body>
   ```
 
+  | Chain   | Account key                          | Signature                               |
+  | ------- | ------------------------------------ | --------------------------------------- |
+  | Cardano | CIP-1854 `m/1854'/1815'/account'`    | Ed25519 over the bytes, 64 bytes        |
+  | BSV     | BIP-32 `m/48'/236'/account'`         | ECDSA secp256k1 over their SHA-256, DER |
+
   `<path and query>` is the request target exactly as sent, e.g.
   `/api/v1/driver/drive/available?location=52.52,13.37`. The body is the exact
   bytes sent, empty for `GET`. In Go, `api.DriverMessage` builds the message
-  and `multisig.Signer.SignMessage` signs it.
+  and `multisig.Signer.SignMessage` or `bsvmultisig.Signer.SignMessage` signs
+  it.
 
 On registration the signature is checked against `public_key` in the body;
 everywhere else against `X-Driver-Key`, which must name a registered driver.
@@ -311,9 +357,16 @@ for the same request within its 30 seconds, so send requests over HTTPS.
 
 `car.year` is the model year, from 1900 to next year.
 
-`public_key` is the driver's CIP-1854 account public key. It identifies the
-driver and cosigns each of their rides. The fare is
-`max(base_fee + ceil(fee_per_km × distance_km), 1000000)`.
+`public_key` identifies the driver, cosigns each of their rides and decides
+the chain they are paid on:
+
+| `public_key`                       | Chain   | `base_fee`, `fee_per_km` in | Minimum fare      |
+| ---------------------------------- | ------- | --------------------------- | ----------------- |
+| CIP-1854 `acct_shared_xvk1…`       | Cardano | lovelace                    | 1,000,000         |
+| BIP-32 account key `xpub…`/`tpub…` at `m/48'/236'/account'` | BSV | satoshis   | 1                 |
+
+The fare is `max(base_fee + ceil(fee_per_km × distance_km), minimum)`. The
+response adds the driver's `network`.
 
 Posting again with a registered `public_key` replaces that driver's fees and
 car with the new values. Rides the driver has already accepted keep the fare
@@ -323,7 +376,7 @@ fixed when they accepted.
 | ------ | ------------------------------------------------------------- |
 | 201    | registered; body echoes the driver                            |
 | 200    | already registered; profile replaced, body echoes the driver   |
-| 400    | bad JSON, invalid or server-owned `public_key`, car fields missing, or `year` out of range |
+| 400    | bad JSON, invalid or server-owned `public_key`, a BSV key while BSV is off, car fields missing, or `year` out of range |
 | 401    | missing, stale or wrong signature by `public_key`              |
 
 ### `GET /driver/drive/available` — find rides
@@ -335,7 +388,9 @@ Query parameters:
 | `location` | yes      | `lat,lng` of the driver             |
 | `range`    | no       | search radius in km, default `5`    |
 
-Returns the `requested` rides whose pickup is within range, nearest first:
+Returns the `requested` rides the driver can take whose pickup is within
+range, nearest first: custodial rides, and rides whose rider key is on the
+driver's chain.
 
 ```json
 [
@@ -375,7 +430,7 @@ address. Returns the ride (`accepted`) with the driver-only fields
 | 401    | missing or unknown `X-Driver-Key`, or bad signature |
 | 404    | unknown ride                                                 |
 | 409    | ride already taken                                           |
-| 422    | the ride address cannot be formed (rider uses the driver's key) |
+| 422    | the rider's key is on another chain, or the ride address cannot be formed (the rider's key is the driver's or the server's at the ride's index) |
 
 ### `GET /driver/drive/{ride_id}` — view an accepted ride
 
@@ -390,7 +445,9 @@ see it.
 
 ### `POST /driver/drive/{ride_id}/payout` — get paid
 
-Once the ride is `paid`, the driver builds a Conway transaction that
+Once the ride is `paid`, the driver builds a transaction.
+
+On **Cardano**, a Conway transaction that
 
 - spends the UTxOs at the ride's `pay_to` address,
 - attaches the ride's `script` as a native script witness,
@@ -404,9 +461,18 @@ and posts it:
 { "transaction": "<hex transaction CBOR, signed by the driver>" }
 ```
 
+The transaction body is not changed, so its id is the one the driver signed.
+
+On **BSV**, a transaction in Extended Format (hex) whose every input spends
+the ride's locking script and is unlocked by `OP_0 <driver signature>`,
+signed `SIGHASH_ALL|FORKID` with the driver's key at
+`m/48'/236'/account'/0/address_index`, with a fee that covers the server's
+signature too. The server's signature completes the unlocking script, which
+changes the transaction id.
+
 The server checks the driver's signature, adds its own, and submits the
-transaction. The transaction body is not changed, so its id is the one the
-driver signed. On success it returns the ride (`paid_out`) with `payout_tx`.
+transaction. On success it returns the ride (`paid_out`) with `payout_tx`,
+the submitted transaction's id.
 
 | Status | When                                                              |
 | ------ | ----------------------------------------------------------------- |

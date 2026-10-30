@@ -42,12 +42,14 @@ type Car struct {
 }
 
 type Driver struct {
-	// PublicKey identifies the driver and is their cosigner key, a CIP-1854
-	// "acct_shared_xvk". Its key at each ride's address index cosigns that
-	// ride, and the driver is paid out by signing a spend from the ride
-	// address with it.
+	// PublicKey identifies the driver and is their cosigner key: a CIP-1854
+	// "acct_shared_xvk" on Cardano or a BIP-32 "xpub"/"tpub" on BSV. Its key
+	// at each ride's address index cosigns that ride, and the driver is paid
+	// out by signing a spend from the ride address with it.
 	PublicKey string `json:"public_key"`
-	// BaseFee and FeePerKm are in lovelace.
+	// Chain follows from PublicKey and decides the currency of the fees.
+	Chain Chain `json:"-"`
+	// BaseFee and FeePerKm are in lovelace on Cardano, satoshis on BSV.
 	BaseFee  uint64 `json:"base_fee"`
 	FeePerKm uint64 `json:"fee_per_km"`
 	Car      Car    `json:"car"`
@@ -64,21 +66,24 @@ type Ride struct {
 	CreatedAt    time.Time
 
 	// AddressIndex is reserved for this ride; every cosigner's key for the
-	// ride is derived at it. Script is the hex CBOR native script locking
-	// PayTo, which the driver attaches to the payout.
+	// ride is derived at it. Script locks PayTo and the driver needs it for
+	// the payout: hex CBOR native script on Cardano, the hex locking script
+	// itself on BSV.
 	AddressIndex uint32
-	// RiderKey is the rider's "acct_shared_xvk", or empty if the server's
-	// backup key stands in for the rider.
+	// RiderKey is the rider's cosigner key, or empty if the server's backup
+	// key stands in for the rider. A key ties the ride to its chain.
 	RiderKey string
 
-	// Set once a driver accepts. PayTo is the 2-of-3 address of the server,
-	// the driver and the rider; the fare is paid there.
-	PayTo        string
-	Script       string
-	DriverKey    string
-	EtaMinutes   int
-	EtaKm        float64
-	FareLovelace uint64
+	// Set once a driver accepts. Chain is the driver's; PayTo is the 2-of-3
+	// address of the server, the driver and the rider, and the fare, in the
+	// chain's smallest unit, is paid there.
+	Chain      Chain
+	PayTo      string
+	Script     string
+	DriverKey  string
+	EtaMinutes int
+	EtaKm      float64
+	Fare       uint64
 
 	// PaymentTx is the settled transaction once Status is StatusPaid.
 	PaymentTx string
@@ -107,6 +112,7 @@ func OpenDB(path string) (*sql.DB, error) {
 const schema = `
 CREATE TABLE IF NOT EXISTS drivers (
 	public_key               TEXT PRIMARY KEY,
+	chain                    TEXT NOT NULL DEFAULT 'cardano',
 	base_fee                 INTEGER NOT NULL,
 	fee_per_km               INTEGER NOT NULL,
 	car_brand                TEXT NOT NULL,
@@ -131,12 +137,14 @@ CREATE TABLE IF NOT EXISTS rides (
 	pickup_time   TEXT NOT NULL,
 	created_at    TEXT NOT NULL,
 	rider_key     TEXT NOT NULL DEFAULT '',
+	chain         TEXT NOT NULL DEFAULT '',
 	pay_to        TEXT NOT NULL DEFAULT '',
 	script        TEXT NOT NULL DEFAULT '',
 	driver_key    TEXT NOT NULL DEFAULT '',
 	eta_minutes   INTEGER NOT NULL DEFAULT 0,
 	eta_km        REAL NOT NULL DEFAULT 0,
-	fare_lovelace INTEGER NOT NULL DEFAULT 0,
+	-- fare is in the smallest unit of the ride's chain.
+	fare          INTEGER NOT NULL DEFAULT 0,
 	payment_tx    TEXT NOT NULL DEFAULT '',
 	payout_tx     TEXT NOT NULL DEFAULT '',
 	-- claim_tx is the transaction being settled for the ride, so a second,
@@ -160,12 +168,47 @@ func newStore(db *sql.DB) (*store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("create schema: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		return nil, fmt.Errorf("migrate schema: %w", err)
+	}
 	// No payout submission outlives the process; the chain refuses a
 	// duplicate of one that went through.
 	if _, err := db.Exec(`UPDATE rides SET paying_out = 0 WHERE paying_out = 1`); err != nil {
 		return nil, err
 	}
 	return &store{db: db}, nil
+}
+
+// migrate brings databases from before BSV support up to schema: their
+// drivers and accepted rides are all Cardano.
+func migrate(db *sql.DB) error {
+	has := func(table, column string) (bool, error) {
+		var n int
+		err := db.QueryRow(`SELECT count(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&n)
+		return n > 0, err
+	}
+	for _, m := range []struct{ table, column, ddl string }{
+		{"drivers", "chain", `ALTER TABLE drivers ADD COLUMN chain TEXT NOT NULL DEFAULT 'cardano'`},
+		{"rides", "chain", `ALTER TABLE rides ADD COLUMN chain TEXT NOT NULL DEFAULT ''`},
+		{"rides", "fare", `ALTER TABLE rides RENAME COLUMN fare_lovelace TO fare`},
+	} {
+		ok, err := has(m.table, m.column)
+		if err != nil {
+			return err
+		}
+		if ok {
+			continue
+		}
+		if _, err := db.Exec(m.ddl); err != nil {
+			return err
+		}
+		if m.table == "rides" && m.column == "chain" {
+			if _, err := db.Exec(`UPDATE rides SET chain = ? WHERE driver_key != ''`, ChainCardano); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func newID() string {
@@ -177,30 +220,31 @@ func newID() string {
 const timeLayout = time.RFC3339Nano
 
 // putDriver registers d under its public key, or replaces the profile of
-// the driver already registered there; created reports which. Rides already
-// accepted keep the fare fixed at acceptance.
+// the driver already registered there; created reports which. The key
+// decides the chain, so it never changes. Rides already accepted keep the
+// fare fixed at acceptance.
 func (s *store) putDriver(d Driver) (created bool, err error) {
 	now := time.Now().UTC().Format(timeLayout)
 	var createdAt string
-	err = s.db.QueryRow(`INSERT INTO drivers (public_key, base_fee, fee_per_km, car_brand, car_model,
+	err = s.db.QueryRow(`INSERT INTO drivers (public_key, chain, base_fee, fee_per_km, car_brand, car_model,
 		car_color, car_license_plate_number, car_year, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (public_key) DO UPDATE SET base_fee = excluded.base_fee, fee_per_km = excluded.fee_per_km,
 			car_brand = excluded.car_brand, car_model = excluded.car_model, car_color = excluded.car_color,
 			car_license_plate_number = excluded.car_license_plate_number, car_year = excluded.car_year
 		RETURNING created_at`,
-		d.PublicKey, int64(d.BaseFee), int64(d.FeePerKm), d.Car.Brand, d.Car.Model,
+		d.PublicKey, d.Chain, int64(d.BaseFee), int64(d.FeePerKm), d.Car.Brand, d.Car.Model,
 		d.Car.Color, d.Car.LicensePlateNumber, d.Car.Year, now).Scan(&createdAt)
 	return createdAt == now, err
 }
 
-const driverColumns = `public_key, base_fee, fee_per_km, car_brand, car_model, car_color,
+const driverColumns = `public_key, chain, base_fee, fee_per_km, car_brand, car_model, car_color,
 	car_license_plate_number, car_year`
 
 func scanDriver(row interface{ Scan(...any) error }) (Driver, error) {
 	var d Driver
 	var baseFee, feePerKm int64
-	err := row.Scan(&d.PublicKey, &baseFee, &feePerKm, &d.Car.Brand, &d.Car.Model, &d.Car.Color,
+	err := row.Scan(&d.PublicKey, &d.Chain, &baseFee, &feePerKm, &d.Car.Brand, &d.Car.Model, &d.Car.Color,
 		&d.Car.LicensePlateNumber, &d.Car.Year)
 	d.BaseFee, d.FeePerKm = uint64(baseFee), uint64(feePerKm)
 	return d, err
@@ -250,20 +294,20 @@ func (s *store) addRide(r Ride) (Ride, error) {
 }
 
 const rideColumns = `id, status, start_address, end_address, start_lat, start_lng, end_lat, end_lng,
-	distance_km, pickup_time, created_at, address_index, rider_key, pay_to, script, driver_key,
-	eta_minutes, eta_km, fare_lovelace, payment_tx, payout_tx`
+	distance_km, pickup_time, created_at, address_index, rider_key, chain, pay_to, script, driver_key,
+	eta_minutes, eta_km, fare, payment_tx, payout_tx`
 
 func scanRide(row interface{ Scan(...any) error }) (Ride, error) {
 	var r Ride
 	var pickup, created string
-	var fareLovelace int64
+	var fare int64
 	err := row.Scan(&r.ID, &r.Status, &r.StartAddress, &r.EndAddress, &r.Start.Lat, &r.Start.Lng,
 		&r.End.Lat, &r.End.Lng, &r.DistanceKm, &pickup, &created, &r.AddressIndex, &r.RiderKey,
-		&r.PayTo, &r.Script, &r.DriverKey, &r.EtaMinutes, &r.EtaKm, &fareLovelace, &r.PaymentTx, &r.PayoutTx)
+		&r.Chain, &r.PayTo, &r.Script, &r.DriverKey, &r.EtaMinutes, &r.EtaKm, &fare, &r.PaymentTx, &r.PayoutTx)
 	if err != nil {
 		return Ride{}, err
 	}
-	r.FareLovelace = uint64(fareLovelace)
+	r.Fare = uint64(fare)
 	if r.PickupTime, err = time.Parse(timeLayout, pickup); err != nil {
 		return Ride{}, fmt.Errorf("ride %s pickup_time: %w", r.ID, err)
 	}
@@ -323,9 +367,9 @@ func (s *store) accept(rideID string, d Driver, payTo, script string, etaMinutes
 	if err != nil {
 		return Ride{}, err
 	}
-	return s.update(rideID, `UPDATE rides SET status = ?, pay_to = ?, script = ?, driver_key = ?,
-		eta_minutes = ?, eta_km = ?, fare_lovelace = ? WHERE id = ? AND status = ?`,
-		StatusAccepted, payTo, script, d.PublicKey, etaMinutes, etaKm, int64(fare(d, r.DistanceKm)),
+	return s.update(rideID, `UPDATE rides SET status = ?, chain = ?, pay_to = ?, script = ?, driver_key = ?,
+		eta_minutes = ?, eta_km = ?, fare = ? WHERE id = ? AND status = ?`,
+		StatusAccepted, d.Chain, payTo, script, d.PublicKey, etaMinutes, etaKm, int64(fare(d, r.DistanceKm)),
 		rideID, StatusRequested)
 }
 

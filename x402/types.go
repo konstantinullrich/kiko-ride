@@ -12,17 +12,29 @@ const (
 	HeaderPaymentResponse  = "PAYMENT-RESPONSE"
 )
 
-// Network is a Cardano x402 network identifier.
+// Network is an x402 network identifier.
 type Network string
 
+// Cardano networks.
 const (
 	Mainnet Network = "cardano:mainnet"
 	Preprod Network = "cardano:preprod"
 	Preview Network = "cardano:preview"
 )
 
+// Bitcoin SV networks. CAIP-2's bip122 namespace names a chain by its
+// genesis block, which BSV shares with BTC and BCH, so these follow the
+// Cardano style instead.
+const (
+	BSVMainnet Network = "bsv:mainnet"
+	BSVTestnet Network = "bsv:testnet"
+)
+
 // Lovelace is the asset id for ADA payments.
 const Lovelace = "lovelace"
+
+// Satoshi is the asset id for BSV payments.
+const Satoshi = "satoshi"
 
 // ResourceInfo describes the protected resource.
 type ResourceInfo struct {
@@ -50,11 +62,13 @@ type PaymentRequired struct {
 	Accepts     []PaymentRequirements `json:"accepts"`
 }
 
-// CardanoPayload is the scheme payload for exact on Cardano.
-type CardanoPayload struct {
-	// Transaction is the signed, unbroadcast transaction (base64 CBOR).
+// TransactionPayload is the exact scheme payload on Cardano and BSV.
+type TransactionPayload struct {
+	// Transaction is the signed, unbroadcast transaction in base64: CBOR on
+	// Cardano, raw or Extended Format on BSV.
 	Transaction string `json:"transaction"`
-	// Nonce is a UTxO reference (txHash#index) spent by the transaction.
+	// Nonce is an output the transaction spends: txHash#index on Cardano,
+	// txid:vout on BSV.
 	Nonce string `json:"nonce"`
 }
 
@@ -63,7 +77,7 @@ type PaymentPayload struct {
 	X402Version int                 `json:"x402Version"`
 	Resource    *ResourceInfo       `json:"resource,omitempty"`
 	Accepted    PaymentRequirements `json:"accepted"`
-	Payload     CardanoPayload      `json:"payload"`
+	Payload     TransactionPayload  `json:"payload"`
 	Extensions  json.RawMessage     `json:"extensions,omitempty"`
 }
 
