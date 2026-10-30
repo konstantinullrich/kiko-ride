@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Salvionied/apollo/v2/backend"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -28,6 +29,11 @@ func (s *Server) createDriver(w http.ResponseWriter, r *http.Request) {
 	}
 	if d.Car.Brand == "" || d.Car.Model == "" || d.Car.Color == "" || d.Car.LicensePlateNumber == "" {
 		writeError(w, http.StatusBadRequest, "car brand, model, color and license_plate_number are required")
+		return
+	}
+	// Model years run up to a year ahead of the calendar.
+	if maxYear := time.Now().Year() + 1; d.Car.Year < MinCarYear || d.Car.Year > maxYear {
+		writeError(w, http.StatusBadRequest, "car year must be "+strconv.Itoa(MinCarYear)+"-"+strconv.Itoa(maxYear))
 		return
 	}
 	d, err := s.store.addDriver(d)

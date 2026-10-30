@@ -34,6 +34,8 @@ type Car struct {
 	Model              string `json:"model"`
 	Color              string `json:"color"`
 	LicensePlateNumber string `json:"license_plate_number"`
+	// Year is the model year.
+	Year int `json:"year"`
 }
 
 type Driver struct {

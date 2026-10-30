@@ -41,6 +41,9 @@ const DefaultSearchRangeKm = 5
 // DefaultSearchResults is used when GET /api/v1/search has no limit.
 const DefaultSearchResults = 5
 
+// MinCarYear is the oldest model year a driver may register.
+const MinCarYear = 1900
+
 // HeaderDriverKey carries the calling driver's public key.
 const HeaderDriverKey = "X-Driver-Key"
 

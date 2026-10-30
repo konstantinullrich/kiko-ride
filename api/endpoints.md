@@ -65,7 +65,8 @@ Returned by every ride endpoint. Fields appear as the ride progresses.
     "brand": "VW",
     "model": "ID.3",
     "color": "white",
-    "license_plate_number": "B-KK 402"
+    "license_plate_number": "B-KK 402",
+    "year": 2021
   },
   "payment_tx": "…",
 
@@ -254,10 +255,13 @@ credential: keep it private.
     "brand": "VW",
     "model": "ID.3",
     "color": "white",
-    "license_plate_number": "B-KK 402"
+    "license_plate_number": "B-KK 402",
+    "year": 2021
   }
 }
 ```
+
+`car.year` is the model year, from 1900 to next year.
 
 `public_key` is the driver's CIP-1854 account public key. It identifies the
 driver and cosigns each of their rides. The fare is
@@ -266,7 +270,7 @@ driver and cosigns each of their rides. The fare is
 | Status | When                                                          |
 | ------ | ------------------------------------------------------------- |
 | 201    | registered; body echoes the driver                            |
-| 400    | bad JSON, invalid or server-owned `public_key`, or car fields missing |
+| 400    | bad JSON, invalid or server-owned `public_key`, car fields missing, or `year` out of range |
 | 409    | a driver with this `public_key` is already registered         |
 
 ### `GET /driver/drive/available` — find rides

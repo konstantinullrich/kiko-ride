@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	apollo "github.com/Salvionied/apollo/v2"
 	"github.com/Salvionied/apollo/v2/backend/fixed"
@@ -216,7 +217,7 @@ func (e *env) registerDriverWithKey(t *testing.T, publicKey string) Driver {
 		"public_key": publicKey,
 		"base_fee":   2_000_000,
 		"fee_per_km": 500_000,
-		"car":        map[string]string{"brand": "VW", "model": "ID.3", "color": "white", "license_plate_number": "B-KK 402"},
+		"car":        map[string]any{"brand": "VW", "model": "ID.3", "color": "white", "license_plate_number": "B-KK 402", "year": 2021},
 	})
 	expect(t, rec, http.StatusCreated)
 	return decode[Driver](t, rec)
@@ -281,7 +282,7 @@ func TestRideLifecycle(t *testing.T) {
 	paid := e.paid(t, "/api/v1/ride/"+ride.ID, req)
 	expect(t, paid, http.StatusOK)
 	view := decode[rideView](t, paid)
-	if view.Status != StatusPaid || view.Car == nil || view.Car.LicensePlateNumber != "B-KK 402" || view.PaymentTx == "" {
+	if view.Status != StatusPaid || view.Car == nil || view.Car.LicensePlateNumber != "B-KK 402" || view.Car.Year != 2021 || view.PaymentTx == "" {
 		t.Fatalf("unexpected paid view: %+v", view)
 	}
 
@@ -338,9 +339,16 @@ func TestDriverValidationAndAuth(t *testing.T) {
 	e := newEnv(t)
 	bad := e.do(t, http.MethodPost, "/api/v1/driver", "", map[string]any{
 		"public_key": "addr1notanaddress",
-		"car":        map[string]string{"brand": "VW", "model": "ID.3", "color": "white", "license_plate_number": "B"},
+		"car":        map[string]any{"brand": "VW", "model": "ID.3", "color": "white", "license_plate_number": "B", "year": 2021},
 	})
 	expect(t, bad, http.StatusBadRequest)
+	for _, year := range []int{0, MinCarYear - 1, time.Now().Year() + 2} {
+		rec := e.do(t, http.MethodPost, "/api/v1/driver", "", map[string]any{
+			"public_key": newSigner(t).AccountKey(),
+			"car":        map[string]any{"brand": "VW", "model": "ID.3", "color": "white", "license_plate_number": "B", "year": year},
+		})
+		expect(t, rec, http.StatusBadRequest)
+	}
 
 	ride := e.createRide(t)
 	expect(t, e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, "", map[string]any{}), http.StatusUnauthorized)
@@ -349,7 +357,7 @@ func TestDriverValidationAndAuth(t *testing.T) {
 	other := e.registerDriver(t)
 	dup := e.do(t, http.MethodPost, "/api/v1/driver", "", map[string]any{
 		"public_key": strings.ToUpper(d.PublicKey),
-		"car":        map[string]string{"brand": "VW", "model": "ID.3", "color": "white", "license_plate_number": "B"},
+		"car":        map[string]any{"brand": "VW", "model": "ID.3", "color": "white", "license_plate_number": "B", "year": 2021},
 	})
 	expect(t, dup, http.StatusConflict)
 	expect(t, e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, d.PublicKey, map[string]any{}), http.StatusOK)
@@ -401,7 +409,7 @@ func TestRideAddressCosigners(t *testing.T) {
 
 func TestCosignerKeyValidation(t *testing.T) {
 	e := newEnv(t)
-	car := map[string]string{"brand": "VW", "model": "ID.3", "color": "white", "license_plate_number": "B"}
+	car := map[string]any{"brand": "VW", "model": "ID.3", "color": "white", "license_plate_number": "B", "year": 2021}
 	for _, key := range []string{"", "acct_shared_xvk1invalid", "addr_test1vz2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzerspjrlsz", e.cosigner.AccountKey()} {
 		rec := e.do(t, http.MethodPost, "/api/v1/driver", "", map[string]any{"public_key": key, "car": car})
 		expect(t, rec, http.StatusBadRequest)
