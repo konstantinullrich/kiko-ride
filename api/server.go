@@ -20,7 +20,6 @@ package api
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"math"
 	"net/http"

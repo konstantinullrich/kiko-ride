@@ -11,10 +11,13 @@ import (
 	"strconv"
 	"testing"
 
+	apollo "github.com/Salvionied/apollo/v2"
 	"github.com/Salvionied/apollo/v2/backend/fixed"
 	"github.com/blinklabs-io/bursa"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 
@@ -57,7 +60,6 @@ type env struct {
 	h           http.Handler
 	cosigner    *multisig.Server
 	facilitator *fakeFacilitator
-	payout      string // a preprod address for drivers
 	txB64       string // a real signed transaction
 }
 
@@ -121,7 +123,7 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &env{h: s.Handler(), cosigner: cosigner, facilitator: f, payout: to.String(), txB64: base64.StdEncoding.EncodeToString(signed)}
+	return &env{h: s.Handler(), cosigner: cosigner, facilitator: f, txB64: base64.StdEncoding.EncodeToString(signed)}
 }
 
 func (e *env) do(t *testing.T, method, path, driverID string, body any) *httptest.ResponseRecorder {
@@ -174,14 +176,13 @@ func (e *env) registerDriver(t *testing.T) Driver {
 	return e.registerDriverWithKey(t, newSigner(t).AccountKey())
 }
 
-func (e *env) registerDriverWithKey(t *testing.T, cosignerKey string) Driver {
+func (e *env) registerDriverWithKey(t *testing.T, publicKey string) Driver {
 	t.Helper()
 	rec := e.do(t, http.MethodPost, "/api/v1/driver", "", map[string]any{
-		"public_key":   e.payout,
-		"cosigner_key": cosignerKey,
-		"base_fee":     2_000_000,
-		"fee_per_km":   500_000,
-		"car":          map[string]string{"brand": "VW", "model": "ID.3", "color": "white", "license_plate_number": "B-KK 402"},
+		"public_key": publicKey,
+		"base_fee":   2_000_000,
+		"fee_per_km": 500_000,
+		"car":        map[string]string{"brand": "VW", "model": "ID.3", "color": "white", "license_plate_number": "B-KK 402"},
 	})
 	expect(t, rec, http.StatusCreated)
 	return decode[Driver](t, rec)
@@ -283,7 +284,7 @@ func TestFailedSettlementKeepsRideUnpaid(t *testing.T) {
 func TestClaimRefusesSecondTransaction(t *testing.T) {
 	s := newStore(0)
 	r := s.addRide(Ride{DistanceKm: 1})
-	s.accept(r.ID, Driver{ID: "d"}, "addr", 1, 1)
+	s.accept(r.ID, Driver{ID: "d"}, "addr", "script", 1, 1)
 	if _, ok := s.claim(r.ID, "tx1"); !ok {
 		t.Fatal("first claim refused")
 	}
@@ -351,10 +352,10 @@ func TestRideAddressCosigners(t *testing.T) {
 		return decode[rideView](t, rec)
 	}
 	// Rides were created first and second, so they hold indexes 0 and 1.
-	if got, want := accept(custodial.ID).PayTo, e.rideAddress(t, d.CosignerKey, "", 0); got != want {
+	if got, want := accept(custodial.ID).PayTo, e.rideAddress(t, d.PublicKey, "", 0); got != want {
 		t.Fatalf("custodial ride pays to %s, want server+driver+backup %s", got, want)
 	}
-	if got, want := accept(withKey.ID).PayTo, e.rideAddress(t, d.CosignerKey, rider.AccountKey(), 1); got != want {
+	if got, want := accept(withKey.ID).PayTo, e.rideAddress(t, d.PublicKey, rider.AccountKey(), 1); got != want {
 		t.Fatalf("ride pays to %s, want server+driver+rider %s", got, want)
 	}
 }
@@ -362,8 +363,8 @@ func TestRideAddressCosigners(t *testing.T) {
 func TestCosignerKeyValidation(t *testing.T) {
 	e := newEnv(t)
 	car := map[string]string{"brand": "VW", "model": "ID.3", "color": "white", "license_plate_number": "B"}
-	for _, key := range []string{"", "acct_shared_xvk1invalid", e.cosigner.AccountKey()} {
-		rec := e.do(t, http.MethodPost, "/api/v1/driver", "", map[string]any{"public_key": e.payout, "cosigner_key": key, "car": car})
+	for _, key := range []string{"", "acct_shared_xvk1invalid", "addr_test1vz2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzerspjrlsz", e.cosigner.AccountKey()} {
+		rec := e.do(t, http.MethodPost, "/api/v1/driver", "", map[string]any{"public_key": key, "car": car})
 		expect(t, rec, http.StatusBadRequest)
 	}
 	rec := e.do(t, http.MethodPost, "/api/v1/ride", "", map[string]string{
@@ -399,5 +400,97 @@ func TestFareFloor(t *testing.T) {
 	}
 	if got := fare(Driver{BaseFee: 2_000_000, FeePerKm: 500_000}, 2.5); got != 3_250_000 {
 		t.Fatalf("got %d", got)
+	}
+}
+
+func TestDriverPayout(t *testing.T) {
+	for _, custodial := range []bool{false, true} {
+		e := newEnv(t)
+		driver := newSigner(t)
+		d := e.registerDriverWithKey(t, driver.AccountKey())
+		riderKey := ""
+		if !custodial {
+			riderKey = newSigner(t).AccountKey()
+		}
+		ride := e.createRideWithKey(t, riderKey)
+		acc := e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, d.ID, map[string]any{"eta_minutes": 3})
+		expect(t, acc, http.StatusOK)
+		accepted := decode[rideView](t, acc)
+		if accepted.AddressIndex == nil || accepted.Script == "" {
+			t.Fatalf("driver view lacks payout details: %+v", accepted)
+		}
+
+		// The driver's wallet builds and signs a spend of the ride address.
+		w, _, err := e.cosigner.RideWallet(d.PublicKey, riderKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		index := *accepted.AddressIndex
+		addr, _ := w.Address(index)
+		if script, _ := cbor.Encode(&addr.Script); hex.EncodeToString(script) != accepted.Script {
+			t.Fatal("view script does not lock the ride address")
+		}
+		fc := fixed.NewEmptyFixedChainContext()
+		out := babbage.BabbageTransactionOutput{
+			OutputAddress: addr.Address,
+			OutputAmount:  mary.MaryTransactionOutputValue{Amount: 10_000_000},
+		}
+		fc.AddUtxo(addr.Address, common.Utxo{
+			Id:     shelley.ShelleyTransactionInput{TxId: common.Blake2b256{2}, OutputIndex: 0},
+			Output: &out,
+		})
+		dest, _ := w.Address(index + 1)
+		p, err := w.BuildPayment(context.Background(), fc, multisig.Payment{To: dest.Address, Lovelace: 2_000_000, ChangeIndex: index, From: []uint32{index}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wits, err := driver.Sign(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := apollo.New(nil).LoadTxCbor(p.TxCbor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b, err = b.AddVerificationKeyWitness(wits[0]); err != nil {
+			t.Fatal(err)
+		}
+		partial, err := b.GetTxCbor()
+		if err != nil {
+			t.Fatal(err)
+		}
+		payout := "/api/v1/driver/drive/" + ride.ID + "/payout"
+		body := map[string]string{"transaction": hex.EncodeToString(partial)}
+
+		expect(t, e.do(t, http.MethodPost, payout, d.ID, body), http.StatusConflict) // not paid yet
+		req := decode[x402.PaymentRequired](t, e.do(t, http.MethodGet, "/api/v1/ride/"+ride.ID, "", nil)).Accepts[0]
+		expect(t, e.paid(t, "/api/v1/ride/"+ride.ID, req), http.StatusOK)
+
+		expect(t, e.do(t, http.MethodPost, payout, e.registerDriver(t).ID, body), http.StatusNotFound)
+		expect(t, e.do(t, http.MethodPost, payout, d.ID, map[string]string{"transaction": p.TxCbor}), http.StatusUnprocessableEntity)
+
+		rec := e.do(t, http.MethodPost, payout, d.ID, body)
+		expect(t, rec, http.StatusOK)
+		res := decode[payoutResponse](t, rec)
+		wantID, _ := p.TxID()
+		if res.TxID != wantID.String() {
+			t.Fatalf("tx id %s, want %s", res.TxID, wantID)
+		}
+		signed, _ := hex.DecodeString(res.Transaction)
+		var tx conway.ConwayTransaction
+		if _, err := cbor.DecodeExact(signed, &tx); err != nil {
+			t.Fatal(err)
+		}
+		if n := len(tx.WitnessSet.VkeyWitnesses.Items()); n != multisig.Threshold {
+			t.Fatalf("expected driver and server witnesses, got %d", n)
+		}
+		if _, err := w.Assemble(p, tx.WitnessSet.VkeyWitnesses.Items()...); err != nil {
+			t.Fatalf("payout does not satisfy the ride script: %v", err)
+		}
+
+		view := decode[rideView](t, e.do(t, http.MethodGet, "/api/v1/driver/drive/"+ride.ID, d.ID, nil))
+		if view.PayoutTx != res.TxID {
+			t.Fatalf("payout not recorded: %+v", view)
+		}
 	}
 }

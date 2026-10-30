@@ -32,9 +32,11 @@
 // Server is the backend's own cosigner. RideWallet combines its key with the
 // driver's and the rider's account keys; a rider without a key is replaced by
 // the server's backup key (a second account from the same mnemonic), giving
-// the server two of the three keys. Server.Sign signs with every server key a
-// proposal's scripts contain, and Payment.From spends a ride's address index
-// directly instead of discovering from index 0.
+// the server two of the three keys. Server.Cosign adds the server's signature
+// to a transaction the driver has already signed, so a payout always needs
+// the driver to start it and the server to agree. Server.Sign signs with
+// every server key a proposal's scripts contain, and Payment.From spends a
+// ride's address index directly instead of discovering from index 0.
 //
 // Proposals and witnesses are plain bytes so they can be passed between
 // parties as hex or JSON.
