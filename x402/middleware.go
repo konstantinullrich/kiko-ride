@@ -149,6 +149,7 @@ func (m *Middleware) serve(w http.ResponseWriter, r *http.Request, price PriceFu
 	}
 	payload, err := decodePayload(header)
 	if err != nil {
+		m.log.Warn("x402: invalid payload", "resource", resource.URL, "err", err)
 		writeJSONError(w, http.StatusBadRequest, ReasonInvalidPayload, err.Error())
 		return
 	}
@@ -157,6 +158,7 @@ func (m *Middleware) serve(w http.ResponseWriter, r *http.Request, price PriceFu
 		return
 	}
 	if !sameRequirements(payload.Accepted, req) {
+		m.log.Warn("x402: requirements changed", "resource", resource.URL)
 		m.paymentRequired(w, resource, req, ReasonRequirementsChanged)
 		return
 	}
@@ -169,6 +171,7 @@ func (m *Middleware) serve(w http.ResponseWriter, r *http.Request, price PriceFu
 	// One settlement per transaction at a time, keyed by the canonical tx
 	// id so a re-encoded copy of the same transaction cannot slip through.
 	if _, busy := m.inFlight.LoadOrStore(txID, struct{}{}); busy {
+		m.log.Warn("x402: duplicate settlement", "tx", txID)
 		m.settleFailed(w, SettleResponse{ErrorReason: ReasonDuplicateSettlement, Transaction: txID, Network: m.cfg.Network})
 		return
 	}
@@ -177,11 +180,12 @@ func (m *Middleware) serve(w http.ResponseWriter, r *http.Request, price PriceFu
 	ctx := r.Context()
 	verify, err := m.cfg.Facilitator.Verify(ctx, payload, req)
 	if err != nil {
-		m.log.Error("x402: verify", "err", err)
+		m.log.Error("x402: verify", "tx", txID, "err", err)
 		m.paymentRequired(w, resource, req, ReasonUnexpectedVerify)
 		return
 	}
 	if !verify.IsValid {
+		m.log.Warn("x402: payment invalid", "tx", txID, "payer", verify.Payer, "reason", verify.InvalidReason)
 		m.paymentRequired(w, resource, req, verify.InvalidReason)
 		return
 	}
@@ -192,20 +196,23 @@ func (m *Middleware) serve(w http.ResponseWriter, r *http.Request, price PriceFu
 	next.ServeHTTP(rec, r.WithContext(context.WithValue(ctx, ctxKey{}, paid)))
 	if rec.status >= 400 {
 		// The resource failed, so the client is not charged.
+		m.log.Warn("x402: not settled, resource failed", "tx", txID, "status", rec.status)
 		rec.flush(w, nil)
 		return
 	}
 
 	settle, err := m.settle(ctx, payload, req)
 	if err != nil {
-		m.log.Error("x402: settle", "err", err)
+		m.log.Error("x402: settle", "tx", txID, "err", err)
 		m.settleFailed(w, SettleResponse{ErrorReason: ReasonUnexpectedSettle, Transaction: txID, Network: m.cfg.Network})
 		return
 	}
 	if !settle.Success {
+		m.log.Warn("x402: settlement failed", "tx", txID, "reason", settle.ErrorReason)
 		m.settleFailed(w, settle)
 		return
 	}
+	m.log.Info("x402: settled", "tx", settle.Transaction, "payer", verify.Payer, "amount", req.Amount, "pay_to", req.PayTo)
 	rec.flush(w, &settle)
 }
 

@@ -18,12 +18,14 @@
 package api
 
 import (
+	"cmp"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"math"
 	"net/http"
+	"time"
 
 	"github.com/Salvionied/apollo/v2/backend"
 
@@ -152,6 +154,38 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 		w.status = http.StatusOK
 	}
 	return w.ResponseWriter.Write(b)
+}
+
+// Flush keeps streaming responses, such as MCP's, working through the
+// wrapper.
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *statusWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+// LogRequests logs every request with its status and duration: server
+// errors at error level, client errors at warn level, the rest at info.
+func LogRequests(log *slog.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w}
+		next.ServeHTTP(sw, r)
+		status := cmp.Or(sw.status, http.StatusOK)
+		level := slog.LevelInfo
+		switch {
+		case status >= 500:
+			level = slog.LevelError
+		case status >= 400:
+			level = slog.LevelWarn
+		}
+		log.Log(r.Context(), level, "request", "method", r.Method, "path", r.URL.Path, "status", status,
+			"duration", time.Since(start).Round(time.Millisecond), "remote", r.RemoteAddr)
+	})
 }
 
 func (s *Server) getCurrency(w http.ResponseWriter, r *http.Request) {

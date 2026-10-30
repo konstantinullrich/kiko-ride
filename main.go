@@ -76,7 +76,7 @@ func run() error {
 	}
 	defer db.Close()
 
-	chain, err := chainContext(string(network), walletNetwork)
+	chain, koiosURL, err := chainContext(string(network), walletNetwork)
 	if err != nil {
 		return err
 	}
@@ -110,19 +110,19 @@ func run() error {
 	addr := envOr("KIKO_LISTEN_ADDR", ":8080")
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           api.LogRequests(slog.Default(), mux),
 		ReadHeaderTimeout: 10 * time.Second,
 		// Paid requests wait for settlement, which can take minutes.
 		WriteTimeout: 4 * time.Minute,
 	}
 	slog.Info("listening", "addr", addr, "network", network, "db", dbPath, "facilitator", facilitatorURL,
-		"cosigner", cosigner.AccountKey())
+		"koios", koiosURL, "cosigner", cosigner.AccountKey())
 	return srv.ListenAndServe()
 }
 
 // chainContext connects to Koios, the public instance for the network unless
 // KOIOS_URL is set.
-func chainContext(network string, walletNetwork multisig.Network) (backend.ChainContext, error) {
+func chainContext(network string, walletNetwork multisig.Network) (backend.ChainContext, string, error) {
 	url := os.Getenv("KOIOS_URL")
 	if url == "" {
 		// network is "cardano:mainnet", "cardano:preprod" or "cardano:preview".
@@ -134,10 +134,10 @@ func chainContext(network string, walletNetwork multisig.Network) (backend.Chain
 		case "preview":
 			url = constants.KoiosBaseUrlPreview
 		default:
-			return nil, fmt.Errorf("KOIOS_URL is required for network %q", network)
+			return nil, "", fmt.Errorf("KOIOS_URL is required for network %q", network)
 		}
 	}
-	return koios.NewKoiosChainContext(url, uint8(walletNetwork), os.Getenv("KOIOS_API_TOKEN")), nil
+	return koios.NewKoiosChainContext(url, uint8(walletNetwork), os.Getenv("KOIOS_API_TOKEN")), url, nil
 }
 
 func envOr(key, def string) string {

@@ -230,6 +230,8 @@ func (s *Server) createRide(w http.ResponseWriter, r *http.Request) {
 		s.storeError(w, "add ride", err)
 		return
 	}
+	s.log.Info("ride created", "ride", ride.ID, "index", ride.AddressIndex, "distance_km", ride.DistanceKm,
+		"custodial", ride.RiderKey == "")
 	writeJSON(w, http.StatusCreated, s.view(ride, false))
 }
 
@@ -266,6 +268,7 @@ func (s *Server) getRide(w http.ResponseWriter, r *http.Request) {
 		p, _ := x402.PaymentFromContext(r.Context())
 		claimed, err := s.store.claim(id, p.TxID)
 		if errors.Is(err, errConflict) || errors.Is(err, errNotFound) {
+			s.log.Warn("payment refused", "ride", id, "tx", p.TxID, "reason", "ride is already being paid")
 			writeError(w, http.StatusConflict, "ride is already being paid")
 			return
 		} else if err != nil {
@@ -281,6 +284,11 @@ func (s *Server) getRide(w http.ResponseWriter, r *http.Request) {
 	s.cfg.Payments.Require(price)(paid).ServeHTTP(sw, r)
 	if claimedTx != "" {
 		// The middleware answers 200 only after settlement succeeded.
+		if sw.status == http.StatusOK {
+			s.log.Info("ride paid", "ride", id, "tx", claimedTx, "fare", ride.FareLovelace)
+		} else {
+			s.log.Warn("ride payment not settled", "ride", id, "tx", claimedTx, "status", sw.status)
+		}
 		if err := s.store.finishClaim(id, claimedTx, sw.status == http.StatusOK); err != nil {
 			// Settled but not recorded: the claim stays, so only this
 			// transaction can claim the ride again.

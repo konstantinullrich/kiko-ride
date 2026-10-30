@@ -100,7 +100,7 @@ func (w *Wallet) BuildPayment(ctx context.Context, chain backend.ChainContext, p
 			byRef[u.Id.String()] = f.Address
 		}
 	}
-	draft, err := w.build(ctx, chain, p, change, pool, nil, all)
+	draft, err := w.build(ctx, chain, p, change.Address, pool, nil, all)
 	if err != nil {
 		return nil, err
 	}
@@ -125,10 +125,34 @@ func (w *Wallet) BuildPayment(ctx context.Context, chain backend.ChainContext, p
 			used = append(used, addr)
 		}
 	}
-	tx, err := w.build(ctx, chain, p, change, nil, selected, used)
+	tx, err := w.build(ctx, chain, p, change.Address, nil, selected, used)
 	if err != nil {
 		return nil, err
 	}
+	return newProposal(tx, used)
+}
+
+// BuildSweep builds an unsigned transaction that sends everything at the
+// address index, tokens included, to `to`, less the fee.
+func (w *Wallet) BuildSweep(ctx context.Context, chain backend.ChainContext, index uint32, to common.Address) (*Proposal, error) {
+	funded, err := w.funded(ctx, chain, []uint32{index})
+	if err != nil {
+		return nil, err
+	}
+	if len(funded) == 0 {
+		return nil, fmt.Errorf("address %d has no funds", index)
+	}
+	// With no payment the inputs, less the fee, all go to the change
+	// address.
+	f := funded[0]
+	tx, err := w.build(ctx, chain, Payment{}, to, nil, f.Utxos, []Address{f.Address})
+	if err != nil {
+		return nil, err
+	}
+	return newProposal(tx, []Address{f.Address})
+}
+
+func newProposal(tx *conway.ConwayTransaction, used []Address) (*Proposal, error) {
 	txCbor, err := cbor.Encode(tx)
 	if err != nil {
 		return nil, err
@@ -145,15 +169,15 @@ func (w *Wallet) build(
 	ctx context.Context,
 	chain backend.ChainContext,
 	p Payment,
-	change Address,
+	change common.Address,
 	pool []common.Utxo,
 	inputs []common.Utxo,
 	addrs []Address,
 ) (*conway.ConwayTransaction, error) {
 	b := apollo.New(chain).
 		WithContext(ctx).
-		SetWallet(apollo.NewExternalWallet(change.Address)).
-		SetChangeAddress(change.Address).
+		SetWallet(apollo.NewExternalWallet(change)).
+		SetChangeAddress(change).
 		AddLoadedUTxOs(pool...)
 	for _, u := range inputs {
 		b = b.AddInput(u)
@@ -169,8 +193,11 @@ func (w *Wallet) build(
 		return nil, fmt.Errorf("load protocol parameters: %w", err)
 	}
 	padding := int64(Threshold*len(addrs)) * vkeyWitnessSize * pp.MinFeeCoefficient
-	b, err = b.SetFeePadding(padding).PayToAddress(p.To, p.Lovelace).Complete()
-	if err != nil {
+	b = b.SetFeePadding(padding)
+	if p.Lovelace > 0 {
+		b = b.PayToAddress(p.To, p.Lovelace)
+	}
+	if b, err = b.Complete(); err != nil {
 		return nil, fmt.Errorf("build transaction: %w", err)
 	}
 	return b.GetTx(), nil

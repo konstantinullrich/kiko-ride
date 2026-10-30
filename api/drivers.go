@@ -44,6 +44,7 @@ func (s *Server) createDriver(w http.ResponseWriter, r *http.Request) {
 		s.storeError(w, "add driver", err)
 		return
 	}
+	s.log.Info("driver registered", "driver", d.PublicKey)
 	writeJSON(w, http.StatusCreated, d)
 }
 
@@ -175,6 +176,8 @@ func (s *Server) acceptRide(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		s.storeError(w, "accept", err)
 	default:
+		s.log.Info("ride accepted", "ride", rideID, "driver", d.PublicKey, "index", ride.AddressIndex,
+			"pay_to", ride.PayTo, "fare", ride.FareLovelace, "custodial", ride.RiderKey == "")
 		writeJSON(w, http.StatusOK, s.view(ride, true))
 	}
 }
@@ -234,9 +237,11 @@ func (s *Server) payout(w http.ResponseWriter, r *http.Request) {
 	}
 	signed, txID, err := s.cfg.Cosigner.Cosign(wallet, ride.AddressIndex, d.PublicKey, txCbor)
 	if errors.Is(err, multisig.ErrMissingSignature) {
+		s.log.Warn("payout refused", "ride", rideID, "reason", "not signed by the driver")
 		writeError(w, http.StatusUnprocessableEntity, "transaction must be signed by the driver first")
 		return
 	} else if err != nil {
+		s.log.Warn("payout refused", "ride", rideID, "reason", "cannot cosign", "err", err)
 		writeError(w, http.StatusUnprocessableEntity, "cannot cosign: "+err.Error())
 		return
 	}
@@ -247,17 +252,20 @@ func (s *Server) payout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "ride not found")
 		return
 	case errors.Is(err, errConflict):
+		s.log.Warn("payout refused", "ride", rideID, "tx", txID, "status", ride.Status,
+			"reason", "ride is not paid or is already being paid out")
 		writeError(w, http.StatusConflict, "ride is not paid or is already being paid out")
 		return
 	case err != nil:
 		s.storeError(w, "begin payout", err)
 		return
 	}
+	s.log.Info("submitting payout", "ride", rideID, "tx", txID, "index", ride.AddressIndex, "size", len(signed))
 	if _, err := backend.SubmitTxContext(r.Context(), s.cfg.Chain, signed); err != nil {
 		if _, ferr := s.store.finishPayout(rideID, txID.String(), false); ferr != nil {
 			s.log.Error("store", "op", "finish payout", "ride", rideID, "err", ferr)
 		}
-		s.log.Warn("submit payout", "ride", rideID, "tx", txID, "err", err)
+		s.log.Warn("submit payout", "ride", rideID, "tx", txID, "tx_cbor", hex.EncodeToString(signed), "err", err)
 		writeError(w, http.StatusBadGateway, "payout rejected: "+err.Error())
 		return
 	}
@@ -269,5 +277,6 @@ func (s *Server) payout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "payout "+txID.String()+" submitted but not recorded")
 		return
 	}
+	s.log.Info("payout submitted", "ride", rideID, "tx", txID)
 	writeJSON(w, http.StatusOK, s.view(paidOut, true))
 }

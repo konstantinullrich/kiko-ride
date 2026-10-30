@@ -253,6 +253,12 @@ requirements; calling it again with `payment_signature` (the base64
 `PAYMENT-SIGNATURE` value) pays the fare. A paid result has a second text
 content, `x402 settlement: <PAYMENT-RESPONSE JSON>`.
 
+Each ride's `payTo` is its own fresh [ride address](#ride-address-2-of-3-multisig),
+so riders' payments cannot be linked on chain. The server instructions and the
+`get_ride` description tell agents to expect a new, unused address on every
+ride and to check the ride id in the requirements' description and the amount
+instead.
+
 ---
 
 ## Driver endpoints

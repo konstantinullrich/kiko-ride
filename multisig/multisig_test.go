@@ -467,3 +467,47 @@ func TestServerCosignsDriverPayout(t *testing.T) {
 		}
 	}
 }
+
+func TestServerSweepsCustodialRide(t *testing.T) {
+	server, driver := newServer(t), newSigner(t)
+	w, _, err := server.RideWallet(driver.AccountKey(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const index = 500
+	fc := fixed.NewEmptyFixedChainContext()
+	addr, _ := w.Address(index)
+	addUtxo(fc, addr.Address, 10_000_000, 1)
+	addUtxo(fc, addr.Address, 3_000_000, 2)
+	other, _, err := server.RideWallet(driver.AccountKey(), newSigner(t).AccountKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	toAddr, _ := other.Address(0)
+
+	p, err := w.BuildSweep(context.Background(), fc, index, toAddr.Address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := p.decode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tx.Body.Inputs()) != 2 {
+		t.Fatalf("expected both UTxOs spent, got %d inputs", len(tx.Body.Inputs()))
+	}
+	outs := tx.Body.Outputs()
+	if len(outs) != 1 || outs[0].Address().String() != toAddr.String() {
+		t.Fatalf("expected one output to %s, got %v", toAddr, outs)
+	}
+	if got := outs[0].Amount().Uint64() + tx.Body.Fee().Uint64(); got != 13_000_000 {
+		t.Fatalf("output plus fee is %d, want 13000000", got)
+	}
+	witnesses, err := server.Sign(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Assemble(p, witnesses...); err != nil {
+		t.Fatalf("server alone cannot spend the sweep: %v", err)
+	}
+}
