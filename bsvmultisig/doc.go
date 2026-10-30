@@ -16,7 +16,7 @@
 //
 // BSV dropped P2SH in the Genesis upgrade, so the multisig script sits in
 // the output itself and has no address: a ride is paid to its locking
-// script, and Address.ScriptHash is what indexers look it up by.
+// script.
 //
 // # Flow
 //
@@ -29,7 +29,8 @@
 //	p, _ := w.BuildPayment(ctx, chain, bsvmultisig.Payment{To: dest, Satoshis: 50_000})
 //	witA, _ := signerA.Sign(p)
 //	witC, _ := signerC.Sign(p)
-//	txID, _ := w.Submit(ctx, chain, p, append(witA, witC...)...)
+//	tx, _ := w.Assemble(p, append(witA, witC...)...)
+//	broadcaster.BroadcastCtx(ctx, tx) // e.g. ARC
 //
 // Proposals carry the transaction in Extended Format (BRC-30), which
 // includes each input's amount and locking script, so a cosigner can compute

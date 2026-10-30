@@ -15,23 +15,13 @@ import (
 	"github.com/bsv-blockchain/go-sdk/transaction/template/p2pkh"
 )
 
-// fakeChain serves UTXOs by locking script and records broadcasts.
+// fakeChain serves UTXOs by locking script.
 type fakeChain struct {
-	utxos     map[string][]UTXO
-	broadcast []*transaction.Transaction
+	utxos map[string][]UTXO
 }
 
 func (c *fakeChain) Unspent(_ context.Context, s *script.Script) ([]UTXO, error) {
 	return c.utxos[hex.EncodeToString(s.Bytes())], nil
-}
-
-func (c *fakeChain) Broadcast(tx *transaction.Transaction) (*transaction.BroadcastSuccess, *transaction.BroadcastFailure) {
-	return c.BroadcastCtx(context.Background(), tx)
-}
-
-func (c *fakeChain) BroadcastCtx(_ context.Context, tx *transaction.Transaction) (*transaction.BroadcastSuccess, *transaction.BroadcastFailure) {
-	c.broadcast = append(c.broadcast, tx)
-	return &transaction.BroadcastSuccess{Txid: tx.TxID().String()}, nil
 }
 
 // fund puts a UTXO of sats on the script at index.
@@ -121,9 +111,6 @@ func TestAddressDeterministic(t *testing.T) {
 	if !x.LockingScript.IsMultiSigOut() {
 		t.Fatalf("not a multisig output: %s", x.LockingScript)
 	}
-	if len(x.ScriptHash()) != 64 {
-		t.Fatalf("bad script hash %q", x.ScriptHash())
-	}
 	if !strings.HasPrefix(a.AccountKey(), "tpub") {
 		t.Fatalf("testnet account key should be a tpub: %s", a.AccountKey())
 	}
@@ -182,14 +169,6 @@ func TestPaymentTwoOfThree(t *testing.T) {
 	paid := in - tx.TotalOutputSatoshis()
 	if minFee := (uint64(tx.Size())*DefaultSatoshisPerKB + 999) / 1000; paid < minFee {
 		t.Fatalf("fee %d is below %d for %d bytes", paid, minFee, tx.Size())
-	}
-
-	txID, err := w.Submit(ctx, chain, p, append(witB, witC...)...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(chain.broadcast) != 1 || txID != chain.broadcast[0].TxID().String() {
-		t.Fatalf("unexpected broadcast: %s %v", txID, chain.broadcast)
 	}
 
 	if _, err := newSigner(t).Sign(p); !errors.Is(err, ErrNotCosigner) {

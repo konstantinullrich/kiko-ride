@@ -4,7 +4,7 @@ net/http middleware that charges for requests with x402 payments on Cardano and 
 
 | Network          | Id                                                   | Asset                         | `payTo`                              |
 | ---------------- | ---------------------------------------------------- | ----------------------------- | ------------------------------------ |
-| Cardano          | `cardano:mainnet`, `cardano:preprod`, `cardano:preview` | `lovelace` or `policyId.assetName` | bech32 address                       |
+| Cardano          | `cardano:mainnet`, `cardano:preprod`, `cardano:preview` | `lovelace`                    | bech32 address                       |
 | Bitcoin SV       | `bsv:mainnet`, `bsv:testnet`                         | `satoshi`                     | P2PKH address or hex locking script  |
 
 BSV uses `bsv:*` rather than CAIP-2's `bip122:<genesis hash>`, which BSV shares with BTC and BCH.

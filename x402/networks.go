@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"regexp"
 
 	apollo "github.com/Salvionied/apollo/v2"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -21,9 +20,8 @@ import (
 // chain holds what the middleware checks itself for one network; everything
 // else is the facilitator's job.
 type chain interface {
-	// defaultAsset is used when a Price names no asset.
-	defaultAsset() string
-	checkAsset(asset string) error
+	// asset is the id of the network's native coin, which prices are in.
+	asset() string
 	checkPayTo(payTo string) error
 	// transactionID returns the canonical id of a base64 payload
 	// transaction, keying duplicate-settlement protection.
@@ -44,10 +42,6 @@ func chainFor(n Network) (chain, error) {
 	return nil, fmt.Errorf("unsupported network %q", n)
 }
 
-func isCardano(n Network) bool {
-	return n == Mainnet || n == Preprod || n == Preview
-}
-
 func decodeTransaction(b64 string) ([]byte, error) {
 	raw, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
@@ -56,21 +50,12 @@ func decodeTransaction(b64 string) ([]byte, error) {
 	return raw, nil
 }
 
-var nativeAssetRe = regexp.MustCompile(`^[0-9a-f]{56}\.[0-9a-f]{0,64}$`)
-
 type cardano struct {
 	network    Network
 	addressNet uint
 }
 
-func (cardano) defaultAsset() string { return Lovelace }
-
-func (cardano) checkAsset(asset string) error {
-	if asset != Lovelace && !nativeAssetRe.MatchString(asset) {
-		return fmt.Errorf("asset %q must be %q or policyIdHex.assetNameHex", asset, Lovelace)
-	}
-	return nil
-}
+func (cardano) asset() string { return Lovelace }
 
 func (c cardano) checkPayTo(payTo string) error {
 	addr, err := apollo.ParseAddress(payTo)
@@ -101,14 +86,7 @@ type bsv struct {
 	p2pkhVersion byte
 }
 
-func (bsv) defaultAsset() string { return Satoshi }
-
-func (bsv) checkAsset(asset string) error {
-	if asset != Satoshi {
-		return fmt.Errorf("asset %q must be %q", asset, Satoshi)
-	}
-	return nil
-}
+func (bsv) asset() string { return Satoshi }
 
 // checkPayTo accepts a P2PKH address of the network, or a locking script in
 // hex for outputs without an address, such as bare multisig.

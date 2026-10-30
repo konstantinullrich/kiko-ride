@@ -333,20 +333,3 @@ func unlockingScript(sigs [Cosigners][]byte) (*script.Script, error) {
 	}
 	return s, nil
 }
-
-// Submit assembles the signed transaction and broadcasts it.
-func (w *Wallet) Submit(ctx context.Context, chain Chain, p *Proposal, witnesses ...Witness) (string, error) {
-	tx, err := w.Assemble(p, witnesses...)
-	if err != nil {
-		return "", err
-	}
-	return broadcast(ctx, chain, tx)
-}
-
-func broadcast(ctx context.Context, chain Chain, tx *transaction.Transaction) (string, error) {
-	ok, fail := chain.BroadcastCtx(ctx, tx)
-	if fail != nil {
-		return "", fmt.Errorf("broadcast: %s %s", fail.Code, fail.Description)
-	}
-	return ok.Txid, nil
-}

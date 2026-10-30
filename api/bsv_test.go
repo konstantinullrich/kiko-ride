@@ -41,7 +41,6 @@ func (b *fakeBroadcaster) BroadcastCtx(_ context.Context, tx *transaction.Transa
 type bsvUTXOs struct {
 	script string
 	utxo   bsvmultisig.UTXO
-	*fakeBroadcaster
 }
 
 func (c bsvUTXOs) Unspent(_ context.Context, s *script.Script) ([]bsvmultisig.UTXO, error) {
@@ -182,7 +181,7 @@ func TestBSVRideLifecycle(t *testing.T) {
 	}
 
 	// The driver spends the ride script, signs, and the server cosigns.
-	chain := bsvUTXOs{script: accepted.PayTo, utxo: bsvmultisig.UTXO{TxID: strings.Repeat("ef", 32), Satoshis: wantFare}, fakeBroadcaster: &fakeBroadcaster{}}
+	chain := bsvUTXOs{script: accepted.PayTo, utxo: bsvmultisig.UTXO{TxID: strings.Repeat("ef", 32), Satoshis: wantFare}}
 	key, _ := ec.NewPrivateKey()
 	addr, _ := script.NewAddressFromPublicKey(key.PubKey(), false)
 	to, _ := p2pkh.Lock(addr)

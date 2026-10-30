@@ -3,7 +3,6 @@ package bsvmultisig
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -12,7 +11,6 @@ import (
 	bip32 "github.com/bsv-blockchain/go-sdk/compat/bip32"
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	"github.com/bsv-blockchain/go-sdk/script"
-	"github.com/bsv-blockchain/go-sdk/transaction"
 	chaincfg "github.com/bsv-blockchain/go-sdk/transaction/chaincfg"
 )
 
@@ -57,11 +55,9 @@ type UTXO struct {
 	Satoshis uint64
 }
 
-// Chain finds UTXOs and broadcasts transactions, e.g. an indexer that
-// looks scripts up by Address.ScriptHash together with an ARC broadcaster.
+// Chain finds the UTXOs locked by a script, e.g. an indexer.
 type Chain interface {
 	Unspent(ctx context.Context, lockingScript *script.Script) ([]UTXO, error)
-	transaction.Broadcaster
 }
 
 // Wallet is a watch-only 2-of-3 multisig wallet built from the cosigners'
@@ -105,14 +101,6 @@ func (a Address) String() string {
 	return hex.EncodeToString(a.LockingScript.Bytes())
 }
 
-// ScriptHash returns the reversed SHA-256 of the locking script in hex, the
-// form indexers such as WhatsOnChain look unspent outputs up by.
-func (a Address) ScriptHash() string {
-	h := sha256.Sum256(a.LockingScript.Bytes())
-	slices.Reverse(h[:])
-	return hex.EncodeToString(h[:])
-}
-
 // keyPosition returns where pub sits in the script, or -1.
 func (a Address) keyPosition(pub *ec.PublicKey) int {
 	return slices.IndexFunc(a.PubKeys[:], func(k *ec.PublicKey) bool { return bytes.Equal(k.Compressed(), pub.Compressed()) })
@@ -145,19 +133,6 @@ func (w *Wallet) Address(index uint32) (Address, error) {
 		return Address{}, err
 	}
 	return Address{Index: index, LockingScript: s, PubKeys: keys}, nil
-}
-
-// Addresses derives count consecutive addresses starting at from.
-func (w *Wallet) Addresses(from, count uint32) ([]Address, error) {
-	addrs := make([]Address, 0, count)
-	for i := range count {
-		addr, err := w.Address(from + i)
-		if err != nil {
-			return nil, err
-		}
-		addrs = append(addrs, addr)
-	}
-	return addrs, nil
 }
 
 // FundedAddress is a derived address and the UTXOs currently locked by it.
@@ -202,21 +177,6 @@ func (w *Wallet) funded(ctx context.Context, chain Chain, indexes []uint32) ([]F
 		}
 	}
 	return funded, nil
-}
-
-// NextUnused returns the lowest index at or after from whose script holds
-// no UTXOs, for handing out fresh deposit scripts.
-func (w *Wallet) NextUnused(ctx context.Context, chain Chain, from uint32) (Address, error) {
-	for index := from; index <= maxIndex; index++ {
-		f, err := w.load(ctx, chain, index)
-		if err != nil {
-			return Address{}, err
-		}
-		if len(f.Utxos) == 0 {
-			return f.Address, nil
-		}
-	}
-	return Address{}, errors.New("no unused index left")
 }
 
 func (w *Wallet) load(ctx context.Context, chain Chain, index uint32) (FundedAddress, error) {

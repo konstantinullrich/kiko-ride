@@ -60,25 +60,13 @@ func run() error {
 		}
 		facilitatorURL = cfPreprodFacilitator
 	}
-	networks := []x402.NetworkConfig{{
-		Network: network,
-		Facilitator: &x402.HTTPFacilitator{
-			URL:    facilitatorURL,
-			Client: &http.Client{Timeout: 3 * time.Minute}, // settlement waits for confirmations
-		},
-	}}
+	networks := []x402.NetworkConfig{{Network: network, Facilitator: facilitator(facilitatorURL)}}
 	bsv, err := bsvConfig(network)
 	if err != nil {
 		return err
 	}
 	if bsv != nil {
-		networks = append(networks, x402.NetworkConfig{
-			Network: bsv.Network,
-			Facilitator: &x402.HTTPFacilitator{
-				URL:    os.Getenv("BSV_FACILITATOR_URL"),
-				Client: &http.Client{Timeout: 3 * time.Minute},
-			},
-		})
+		networks = append(networks, x402.NetworkConfig{Network: bsv.Network, Facilitator: facilitator(os.Getenv("BSV_FACILITATOR_URL"))})
 	}
 	payments, err := x402.New(x402.Config{Networks: networks})
 	if err != nil {
@@ -184,6 +172,11 @@ func bsvConfig(cardano x402.Network) (*api.BSVConfig, error) {
 		Cosigner:    cosigner,
 		Broadcaster: &broadcaster.Arc{ApiUrl: arcURL, ApiKey: os.Getenv("BSV_ARC_API_KEY"), Client: &http.Client{Timeout: time.Minute}},
 	}, nil
+}
+
+func facilitator(url string) *x402.HTTPFacilitator {
+	// Settlement waits for confirmations, which can take minutes.
+	return &x402.HTTPFacilitator{URL: url, Client: &http.Client{Timeout: 3 * time.Minute}}
 }
 
 func envOr(key, def string) string {

@@ -68,7 +68,6 @@ func TestBSVRequirements(t *testing.T) {
 	for _, p := range []Price{
 		{PayTo: bx.mainnetAddress, Amount: 1},
 		{PayTo: bx.address[:len(bx.address)-1] + "x", Amount: 1},
-		{PayTo: bx.address, Amount: 1, Asset: Lovelace},
 		{PayTo: "addr_test1vz", Amount: 1},
 	} {
 		if _, err := m.requirements(p); err == nil {
@@ -76,9 +75,6 @@ func TestBSVRequirements(t *testing.T) {
 		}
 	}
 
-	if _, err := New(Config{Networks: []NetworkConfig{{Network: BSVTestnet, Facilitator: okFacilitator(), Confirmations: new(int)}}}); err == nil {
-		t.Fatal("expected Cardano confirmations to be rejected on BSV")
-	}
 	if _, err := New(Config{Networks: []NetworkConfig{{Network: "bsv:regtest", Facilitator: okFacilitator()}}}); err == nil {
 		t.Fatal("expected an unknown network to be rejected")
 	}

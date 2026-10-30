@@ -26,12 +26,10 @@ type Price struct {
 	// PayTo receives the payment: a bech32 address on Cardano; a P2PKH
 	// address or a hex locking script on BSV.
 	PayTo string
-	// Amount is in atomic units of Asset. A pure-lovelace payment output must
-	// clear the ledger's min-UTxO, roughly 1 ADA.
+	// Amount is in the network's native coin: lovelace on Cardano, satoshis
+	// on BSV. A pure-lovelace payment output must clear the ledger's
+	// min-UTxO, roughly 1 ADA.
 	Amount uint64
-	// Asset defaults to the network's native coin: Lovelace on Cardano, which
-	// also takes a native token as "policyIdHex.assetNameHex"; Satoshi on BSV.
-	Asset string
 	// Description and MimeType describe the resource to the client.
 	Description string
 	MimeType    string
@@ -57,11 +55,6 @@ type NetworkConfig struct {
 	Facilitator Facilitator
 	// MaxTimeoutSeconds defaults to DefaultMaxTimeoutSeconds.
 	MaxTimeoutSeconds int
-	// Confirmations sets the Cardano scheme's
-	// extra.confirmationPolicy.l1Confirmations (-1..20). Nil omits it, which
-	// the scheme treats as 1. It must lie within the range the facilitator
-	// advertises in /supported. Cardano networks only.
-	Confirmations *int
 }
 
 // Config configures the middleware.
@@ -107,14 +100,6 @@ func New(cfg Config) (*Middleware, error) {
 		}
 		if nc.MaxTimeoutSeconds == 0 {
 			nc.MaxTimeoutSeconds = DefaultMaxTimeoutSeconds
-		}
-		if c := nc.Confirmations; c != nil {
-			if !isCardano(nc.Network) {
-				return nil, fmt.Errorf("%s: confirmations apply to Cardano networks only", nc.Network)
-			}
-			if *c < -1 || *c > 20 {
-				return nil, fmt.Errorf("%s: confirmations %d out of range -1..20", nc.Network, *c)
-			}
 		}
 		networks[nc.Network] = &network{NetworkConfig: nc, chain: c}
 	}
@@ -281,25 +266,14 @@ func (m *Middleware) requirements(p Price) (PaymentRequirements, error) {
 	if err := n.chain.checkPayTo(p.PayTo); err != nil {
 		return PaymentRequirements{}, err
 	}
-	asset := p.Asset
-	if asset == "" {
-		asset = n.chain.defaultAsset()
-	}
-	if err := n.chain.checkAsset(asset); err != nil {
-		return PaymentRequirements{}, err
-	}
-	req := PaymentRequirements{
+	return PaymentRequirements{
 		Scheme:            "exact",
 		Network:           p.Network,
 		Amount:            strconv.FormatUint(p.Amount, 10),
-		Asset:             asset,
+		Asset:             n.chain.asset(),
 		PayTo:             p.PayTo,
 		MaxTimeoutSeconds: n.MaxTimeoutSeconds,
-	}
-	if c := n.Confirmations; c != nil {
-		req.Extra = map[string]any{"confirmationPolicy": map[string]any{"l1Confirmations": *c}}
-	}
-	return req, nil
+	}, nil
 }
 
 func (m *Middleware) resourceURL(r *http.Request) string {
