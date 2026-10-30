@@ -40,8 +40,8 @@ docker run -p 8080:8080 --env-file .env -v kiko-data:/data kiko-backend
 | `X402_FACILITATOR_URL`     | no       | Required outside preprod; defaults to the Cardano Foundation's    |
 | `KOIOS_URL`                | no       | Koios base URL; defaults to the public instance for the network   |
 | `KOIOS_API_TOKEN`          | no       | Koios bearer token; the public tier is used when unset            |
-| `BSV_FACILITATOR_URL`      | no       | x402 facilitator for BSV fares; enables BSV drivers and riders    |
-| `BSV_ARC_URL`              | with BSV | ARC endpoint that submits BSV payouts (`BSV_ARC_API_KEY` optional) |
+| `BSV_ARC_URL`              | no       | ARC endpoint ending in `/v1`; enables BSV drivers and riders and broadcasts their transactions (`BSV_ARC_API_KEY` optional) |
+| `BSV_FACILITATOR_URL`      | no       | External x402 facilitator for BSV fares; the built-in one is used when unset |
 | `KIKO_LISTEN_ADDR`         | no       | Default `:8080`                                                   |
 | `KIKO_DB_PATH`             | no       | SQLite database file, default `kiko.db` (`/data/kiko.db` in Docker) |
 | `MAPBOX_PERMANENT`         | no       | `true` for permanent geocoding                                    |

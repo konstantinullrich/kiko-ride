@@ -258,7 +258,13 @@ Free while the ride is `requested`, `paid` or `paid_out`. While it is
    | Network     | `transaction`             | `nonce`              |
    | ----------- | ------------------------- | -------------------- |
    | `cardano:*` | Conway transaction CBOR   | `<txHash>#<index>`   |
-   | `bsv:*`     | raw or Extended Format    | `<txid>:<vout>`      |
+   | `bsv:*`     | Extended Format (BRC-30)  | `<txid>:<vout>`      |
+
+   On BSV the server's built-in facilitator executes every input script, so
+   each input must carry the output it spends (Extended Format). It accepts
+   the payment when one output pays exactly `amount` to `payTo` and the
+   `nonce` is one of the inputs, and settles by broadcasting through ARC; it
+   does not wait for a block.
 
 3. The server verifies and settles the payment through the facilitator. On
    success it answers `200` with the ride (`paid`, including `car`) and a
@@ -299,6 +305,12 @@ so riders' payments cannot be linked on chain. The server instructions and the
 `get_ride` description tell agents to expect a new, unused address on every
 ride and to check the ride id in the requirements' description and the amount
 instead.
+
+They also spell out how paying on `bsv:*` differs from usual x402: `payTo` is
+a hex locking script to lock an output with, that output pays exactly
+`amount`, the transaction is Extended Format (BRC-30) rather than raw, the
+`nonce` is `<txid>:<vout>`, and the ride is paid once ARC accepts the
+transaction.
 
 ---
 

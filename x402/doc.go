@@ -24,7 +24,8 @@
 // have no address such as bare multisig, and the payload transaction is raw
 // or Extended Format. The middleware checks only the shape of each network's
 // payTo, asset and transaction; whether the transaction pays is the
-// facilitator's call.
+// facilitator's call. Package bsvfacilitator is an in-process BSV
+// facilitator.
 //
 // The flow follows the scheme's "authorization" model: an unpaid request gets
 // a 402 with PAYMENT-REQUIRED; the paid retry's PAYMENT-SIGNATURE is checked

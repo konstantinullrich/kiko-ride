@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ import (
 
 	"kiko-backend/bsvmultisig"
 	"kiko-backend/x402"
+	"kiko-backend/x402/bsvfacilitator"
 )
 
 // fakeBroadcaster records BSV payouts.
@@ -245,5 +247,62 @@ func TestBSVDriverSignature(t *testing.T) {
 		if rec.Code != want {
 			t.Errorf("%s: expected %d, got %d: %s", name, want, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+// TestBSVRiderPaysWithBuiltInFacilitator pays a ride from a rider's
+// P2PKH coins to the ride's bare multisig script, verified and broadcast by
+// the built-in facilitator.
+func TestBSVRiderPaysWithBuiltInFacilitator(t *testing.T) {
+	e := newEnvWith(t, func(b transaction.Broadcaster) x402.Facilitator {
+		return &bsvfacilitator.Facilitator{Network: x402.BSVTestnet, Broadcaster: b}
+	})
+	d := e.registerBSVDriver(t, newBSVSigner(t).AccountKey())
+	riderKey, _ := newBSVSigner(t).Key(4)
+	ride := e.createRideWithKey(t, riderKey)
+	expect(t, e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, d.PublicKey, map[string]any{}), http.StatusOK)
+	req := decode[x402.PaymentRequired](t, e.do(t, http.MethodGet, "/api/v1/ride/"+ride.ID, "", nil)).Accepts[0]
+	if !strings.Contains(req.PayTo, riderKey) {
+		t.Fatal("payTo does not hold the rider's key")
+	}
+
+	// The rider's wallet pays the fare from a P2PKH coin, in Extended Format.
+	fare, _ := strconv.ParseUint(req.Amount, 10, 64)
+	payer, _ := ec.NewPrivateKey()
+	payerAddr, _ := script.NewAddressFromPublicKey(payer.PubKey(), false)
+	payerLock, _ := p2pkh.Lock(payerAddr)
+	rideScript, _ := script.NewFromHex(req.PayTo)
+	pay := func(sats uint64) string {
+		unlock, _ := p2pkh.Unlock(payer, nil)
+		tx := transaction.NewTransaction()
+		if err := tx.AddInputFrom(strings.Repeat("ab", 32), 0, payerLock.String(), fare+10_000, unlock); err != nil {
+			t.Fatal(err)
+		}
+		tx.AddOutput(&transaction.TransactionOutput{Satoshis: sats, LockingScript: rideScript})
+		tx.AddOutput(&transaction.TransactionOutput{Satoshis: fare + 10_000 - sats - 100, LockingScript: payerLock})
+		if err := tx.Sign(); err != nil {
+			t.Fatal(err)
+		}
+		ef, _ := tx.EF()
+		raw, _ := json.Marshal(x402.PaymentPayload{X402Version: x402.Version, Accepted: req,
+			Payload: x402.TransactionPayload{Transaction: base64.StdEncoding.EncodeToString(ef), Nonce: strings.Repeat("ab", 32) + ":0"}})
+		return base64.StdEncoding.EncodeToString(raw)
+	}
+	get := func(signature string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/ride/"+ride.ID, nil)
+		r.Header.Set(x402.HeaderPaymentSignature, signature)
+		rec := httptest.NewRecorder()
+		e.h.ServeHTTP(rec, r)
+		return rec
+	}
+
+	expect(t, get(pay(fare-1)), http.StatusPaymentRequired)
+	if len(e.broadcaster.sent) != 0 {
+		t.Fatal("an underpayment was broadcast")
+	}
+	paid := get(pay(fare))
+	expect(t, paid, http.StatusOK)
+	if v := decode[rideView](t, paid); v.Status != StatusPaid || len(e.broadcaster.sent) != 1 || v.PaymentTx != e.broadcaster.sent[0].TxID().String() {
+		t.Fatalf("unexpected paid ride %+v, broadcast %d", v, len(e.broadcaster.sent))
 	}
 }

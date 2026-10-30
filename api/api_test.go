@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/bsv-blockchain/go-sdk/transaction"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -154,6 +155,13 @@ func signRequest(req *http.Request, key, target string, body []byte, at time.Tim
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
+	return newEnvWith(t, nil)
+}
+
+// newEnvWith settles BSV payments with bsvPayments, or with the fake
+// facilitator when it is nil; its broadcaster is the env's.
+func newEnvWith(t *testing.T, bsvPayments func(transaction.Broadcaster) x402.Facilitator) *env {
+	t.Helper()
 	a, b, c := newSigner(t), newSigner(t), newSigner(t)
 	w, err := multisig.NewWallet(multisig.Preprod, a.AccountKey(), b.AccountKey(), c.AccountKey())
 	if err != nil {
@@ -182,9 +190,14 @@ func newEnv(t *testing.T) *env {
 	}
 
 	f := &fakeFacilitator{settle: x402.SettleResponse{Success: true, Transaction: "tx", Network: x402.Preprod}}
+	broadcast := &fakeBroadcaster{}
+	var bsvFacilitator x402.Facilitator = f
+	if bsvPayments != nil {
+		bsvFacilitator = bsvPayments(broadcast)
+	}
 	payments, err := x402.New(x402.Config{Networks: []x402.NetworkConfig{
 		{Network: x402.Preprod, Facilitator: f},
-		{Network: x402.BSVTestnet, Facilitator: f},
+		{Network: x402.BSVTestnet, Facilitator: bsvFacilitator},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -199,7 +212,6 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	broadcast := &fakeBroadcaster{}
 	s, err := New(Config{Network: x402.Preprod, Cosigner: cosigner, DB: db, Geocoder: fakeGeocoder{}, Payments: payments, Chain: chain,
 		BSV: &BSVConfig{Network: x402.BSVTestnet, Cosigner: bsvCosigner, Broadcaster: broadcast}})
 	if err != nil {

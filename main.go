@@ -19,6 +19,7 @@ import (
 	"kiko-backend/geo"
 	"kiko-backend/multisig"
 	"kiko-backend/x402"
+	"kiko-backend/x402/bsvfacilitator"
 )
 
 // cfPreprodFacilitator is the Cardano Foundation's hosted preprod facilitator.
@@ -35,8 +36,10 @@ const cfPreprodFacilitator = "https://x402.preprod.dev.ecosyseng.cf-deployments.
 //	MAPBOX_PERMANENT           "true" for permanent geocoding (needed to store results)
 //	KOIOS_URL                  Koios base URL for submitting payouts (defaults to the public instance for the network)
 //	KOIOS_API_TOKEN            optional Koios bearer token; the public tier is used when unset
-//	BSV_FACILITATOR_URL        x402 facilitator for BSV fares; set it (and BSV_ARC_URL) to accept BSV drivers
-//	BSV_ARC_URL, BSV_ARC_API_KEY  ARC endpoint (and optional key) for submitting BSV payouts
+//	BSV_ARC_URL, BSV_ARC_API_KEY  ARC endpoint ending in /v1 (and optional key); set it to accept BSV.
+//	                           Rider payments and driver payouts are broadcast through it.
+//	BSV_FACILITATOR_URL        optional external x402 facilitator for BSV fares; by default the
+//	                           built-in one (x402/bsvfacilitator) verifies and settles them
 //
 // BSV runs on mainnet when CARDANO_NETWORK is mainnet, otherwise on testnet.
 func main() {
@@ -66,7 +69,11 @@ func run() error {
 		return err
 	}
 	if bsv != nil {
-		networks = append(networks, x402.NetworkConfig{Network: bsv.Network, Facilitator: facilitator(os.Getenv("BSV_FACILITATOR_URL"))})
+		var f x402.Facilitator = &bsvfacilitator.Facilitator{Network: bsv.Network, Broadcaster: bsv.Broadcaster}
+		if url := os.Getenv("BSV_FACILITATOR_URL"); url != "" {
+			f = facilitator(url)
+		}
+		networks = append(networks, x402.NetworkConfig{Network: bsv.Network, Facilitator: f})
 	}
 	payments, err := x402.New(x402.Config{Networks: networks})
 	if err != nil {
@@ -149,15 +156,15 @@ func chainContext(network string, walletNetwork multisig.Network) (backend.Chain
 	return koios.NewKoiosChainContext(url, uint8(walletNetwork), os.Getenv("KOIOS_API_TOKEN")), url, nil
 }
 
-// bsvConfig enables BSV drivers when BSV_FACILITATOR_URL is set, on mainnet
-// alongside Cardano mainnet and on testnet otherwise.
+// bsvConfig enables BSV when BSV_ARC_URL is set, on mainnet alongside
+// Cardano mainnet and on testnet otherwise.
 func bsvConfig(cardano x402.Network) (*api.BSVConfig, error) {
-	if os.Getenv("BSV_FACILITATOR_URL") == "" {
-		return nil, nil
-	}
 	arcURL := os.Getenv("BSV_ARC_URL")
 	if arcURL == "" {
-		return nil, errors.New("BSV_ARC_URL is required with BSV_FACILITATOR_URL")
+		if os.Getenv("BSV_FACILITATOR_URL") != "" {
+			return nil, errors.New("BSV_ARC_URL is required with BSV_FACILITATOR_URL")
+		}
+		return nil, nil
 	}
 	network, walletNetwork := x402.BSVTestnet, bsvmultisig.Testnet
 	if cardano == x402.Mainnet {

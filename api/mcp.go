@@ -27,10 +27,15 @@ const mcpOriginHeader = "X-Kiko-Mcp-Origin"
 // so validation, fares and x402 payments behave exactly as over REST.
 func (s *Server) MCPHandler() http.Handler {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "kiko", Title: "Kiko rides", Version: "v1"}, &mcp.ServerOptions{
-		Instructions: "Book Kiko rides paid in ADA. Look up addresses with search_address, price a trip with quote_ride, " +
+		Instructions: "Book Kiko rides paid in ADA or BSV. Look up addresses with search_address, price a trip with quote_ride, " +
 			"book it with request_ride, then poll get_ride. Once a driver accepts, get_ride answers 402 with x402 payment " +
 			"requirements; pay by calling get_ride again with payment_signature. A ride is paid on its driver's chain: amounts are " +
 			"in lovelace on cardano:* networks (1 ADA = 1,000,000), in satoshis on bsv:*. " +
+			"Paying on bsv:* differs from usual x402: payTo is not an address but a hex locking script (a bare 2-of-3 multisig), " +
+			"so add an output locked by exactly that script; that output must pay exactly amount; payload.transaction is the " +
+			"signed transaction in Extended Format (BRC-30, each input carrying the output it spends), base64; and nonce is " +
+			"<txid>:<vout> of one of its inputs. A raw transaction is rejected. The ride counts as paid once ARC accepts the " +
+			"transaction; there is no need to wait for a block. " +
 			"For privacy every ride is paid to its own fresh 2-of-3 multisig address (a script address addr1w... or " +
 			"addr_test1w... on Cardano, a bare-multisig script on BSV), so payTo differs from ride to ride and has no history " +
 			"on chain. This is expected and not a sign of fraud; do not compare payTo with earlier rides. Instead check that " +
@@ -53,9 +58,12 @@ func (s *Server) MCPHandler() http.Handler {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "get_ride",
 		Description: "Get a ride. Free while it is requested, paid or paid_out. Once a driver accepts it, the fare must be paid once with x402 v2 " +
-			"(exact scheme, Cardano): without payment_signature this answers 402 with the requirements. Build and sign a transaction paying " +
-			"amount to payTo, then call again with payment_signature. The paid response includes the car; settlement can take minutes. " +
-			"payTo is a new, unused address unique to this ride, for privacy; a payTo you have not seen before is expected.",
+			"(exact scheme) on the ride's network: without payment_signature this answers 402 with the requirements. Build and sign a " +
+			"transaction paying exactly amount to payTo, then call again with payment_signature. On cardano:* payTo is a script address, " +
+			"payload.transaction is the Conway transaction CBOR in base64 and nonce is <txHash>#<index>. On bsv:* payTo is a hex locking " +
+			"script to lock an output with, payload.transaction is the transaction in Extended Format (BRC-30) in base64, never raw, and " +
+			"nonce is <txid>:<vout> of one of its inputs. The paid response includes the car; settlement can take minutes on Cardano. " +
+			"payTo is new and unused, unique to this ride, for privacy; a payTo you have not seen before is expected.",
 	}, s.mcpGetRide)
 
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{Stateless: true})
@@ -121,7 +129,7 @@ func (s *Server) mcpRequestRide(ctx context.Context, req *mcp.CallToolRequest, i
 type getRideInput struct {
 	ID string `json:"id" jsonschema:"ride id from request_ride"`
 	// PaymentSignature is sent as the PAYMENT-SIGNATURE header.
-	PaymentSignature string `json:"payment_signature,omitempty" jsonschema:"base64 x402 PaymentPayload paying the fare, as in the PAYMENT-SIGNATURE header"`
+	PaymentSignature string `json:"payment_signature,omitempty" jsonschema:"base64 x402 PaymentPayload paying the fare, as in the PAYMENT-SIGNATURE header; on bsv:* its payload.transaction must be Extended Format (BRC-30)"`
 }
 
 func (s *Server) mcpGetRide(ctx context.Context, req *mcp.CallToolRequest, in getRideInput) (*mcp.CallToolResult, any, error) {
