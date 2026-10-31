@@ -299,7 +299,7 @@ func (e *env) createRideWithKey(t *testing.T, cosignerKey string) rideView {
 	rec := e.do(t, http.MethodPost, "/api/v1/ride", "", map[string]string{
 		"start_address": "Berlin Hbf",
 		"end_address":   "Alexanderplatz",
-		"pickup_time":   "2026-11-01T09:00:00Z",
+		"pickup_time":   time.Now().Add(-time.Hour).Format(time.RFC3339),
 		"cosigner_key":  cosignerKey,
 	})
 	expect(t, rec, http.StatusCreated)
@@ -760,6 +760,19 @@ func TestDriverPayout(t *testing.T) {
 		expect(t, e.do(t, http.MethodPost, payout, d.PublicKey, body), http.StatusConflict) // not paid yet
 		req := decode[x402.PaymentRequired](t, e.do(t, http.MethodGet, "/api/v1/ride/"+ride.ID, "", nil)).Accepts[0]
 		expect(t, e.paid(t, "/api/v1/ride/"+ride.ID, req), http.StatusOK)
+
+		// Paid, but the pickup time has not come: nothing is submitted.
+		setPickup := func(at time.Time) {
+			if _, err := e.db.Exec(`UPDATE rides SET pickup_time = ? WHERE id = ?`, at.UTC().Format(timeLayout), ride.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		setPickup(time.Now().Add(time.Hour))
+		expect(t, e.do(t, http.MethodPost, payout, d.PublicKey, body), http.StatusConflict)
+		if len(e.chain.submitted) != 0 {
+			t.Fatal("a ride was paid out before its pickup time")
+		}
+		setPickup(time.Now().Add(-time.Hour))
 
 		expect(t, e.do(t, http.MethodPost, payout, e.registerDriver(t).PublicKey, body), http.StatusNotFound)
 		expect(t, e.do(t, http.MethodPost, payout, d.PublicKey, map[string]string{"transaction": p.TxCbor}), http.StatusUnprocessableEntity)

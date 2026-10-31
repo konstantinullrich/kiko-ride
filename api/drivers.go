@@ -253,6 +253,11 @@ func (s *Server) payout(w http.ResponseWriter, r *http.Request) {
 		s.storeError(w, "ride", err)
 		return
 	}
+	if time.Now().Before(ride.PickupTime) {
+		s.log.Warn("payout refused", "ride", rideID, "pickup_time", ride.PickupTime, "reason", "before pickup time")
+		writeError(w, http.StatusConflict, "ride cannot be paid out before its pickup time")
+		return
+	}
 	txID, signed, submit, err := s.cosignPayout(ride, strings.TrimSpace(req.Transaction))
 	switch {
 	case errors.Is(err, errBadPayout):

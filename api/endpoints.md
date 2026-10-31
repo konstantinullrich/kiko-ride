@@ -457,7 +457,8 @@ see it.
 
 ### `POST /driver/drive/{ride_id}/payout` — get paid
 
-Once the ride is `paid`, the driver builds a transaction.
+Once the ride is `paid` and its `pickup_time` has passed, the driver builds a
+transaction.
 
 On **Cardano**, a Conway transaction that
 
@@ -492,6 +493,6 @@ the submitted transaction's id.
 | 400    | bad JSON or `transaction` is not hex                              |
 | 401    | missing or unknown `X-Driver-Key`, or bad signature |
 | 404    | unknown ride or accepted by another driver                        |
-| 409    | ride is not `paid`, already `paid_out`, or a payout is in progress |
+| 409    | ride's `pickup_time` has not come yet, ride is not `paid`, already `paid_out`, or a payout is in progress |
 | 422    | not signed by the driver, wrong script, or an invalid signature   |
 | 502    | the chain rejected the transaction; the ride stays `paid`, fix and retry |
