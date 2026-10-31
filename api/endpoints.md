@@ -308,6 +308,10 @@ fares and payments.
 | `request_ride`   | `POST /ride`      | the request body                                           |
 | `get_ride`       | `GET /ride/{id}`  | `id`, `payment_signature`                                  |
 
+The server instructions tell agents to keep polling `get_ride` until the
+ride is `paid`, retrying a payment that is still settling with the same
+`payment_signature`.
+
 A tool returns the route's JSON body. From status 400 on the result is an
 error whose text is `"<status> <reason>: <body>"`. So while a ride is
 `accepted`, `get_ride` fails with `402 Payment Required:` and the x402

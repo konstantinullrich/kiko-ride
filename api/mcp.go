@@ -29,7 +29,8 @@ func (s *Server) MCPHandler() http.Handler {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "kiko", Title: "Kiko rides", Version: "v1"}, &mcp.ServerOptions{
 		Instructions: "Book Kiko rides paid in ADA or BSV. Look up addresses with search_address, price a trip with quote_ride, " +
 			"book it with request_ride, then poll get_ride. Once a driver accepts, get_ride answers 402 with x402 payment " +
-			"requirements; pay by calling get_ride again with payment_signature. A ride is paid on its driver's chain: amounts are " +
+			"requirements; pay by calling get_ride again with payment_signature. Keep polling get_ride, every 10 to 20 seconds, " +
+			"until its status is paid: the rider has no ride, and should not head to the car, before then. A ride is paid on its driver's chain: amounts are " +
 			"in lovelace on cardano:* networks (1 ADA = 1,000,000), in satoshis on bsv:*. " +
 			"Paying on bsv:* differs from usual x402: payTo is not an address but a hex locking script (a bare 2-of-3 multisig), " +
 			"so add an output locked by exactly that script; that output must pay exactly amount; payload.transaction is the " +
@@ -37,8 +38,8 @@ func (s *Server) MCPHandler() http.Handler {
 			"<txid>:<vout> of one of its inputs. A raw transaction is rejected. The ride counts as paid once ARC accepts the " +
 			"transaction; there is no need to wait for a block. " +
 			"If paying answers 402 with an x402 settlement whose errorReason is settlement_pending or unexpected_settle_error, " +
-			"the transaction may still land: call get_ride again with the same payment_signature and never sign a new " +
-			"transaction, or the rider could pay twice. " +
+			"the transaction may still land: keep calling get_ride with the same payment_signature until the ride is paid, " +
+			"and never sign a new transaction, or the rider could pay twice. " +
 			"For privacy every ride is paid to its own fresh 2-of-3 multisig address (a script address addr1w... or " +
 			"addr_test1w... on Cardano, a bare-multisig script on BSV), so payTo differs from ride to ride and has no history " +
 			"on chain. This is expected and not a sign of fraud; do not compare payTo with earlier rides. Instead check that " +
@@ -68,8 +69,8 @@ func (s *Server) MCPHandler() http.Handler {
 			"nonce is <txid>:<vout> of one of its inputs. The paid response includes the car; settlement can take minutes on Cardano. " +
 			"payTo is new and unused, unique to this ride, for privacy; a payTo you have not seen before is expected. " +
 			"On cardano:* set a TTL within maxTimeoutSeconds and pay from plain wallet inputs, no Plutus scripts. " +
-			"An x402 settlement of settlement_pending or unexpected_settle_error means the payment may still land: retry " +
-			"with the same payment_signature, never a new transaction.",
+			"Keep polling until status is paid. An x402 settlement of settlement_pending or unexpected_settle_error means the " +
+			"payment may still land: keep retrying with the same payment_signature until the ride is paid, never a new transaction.",
 	}, s.mcpGetRide)
 
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{Stateless: true})
