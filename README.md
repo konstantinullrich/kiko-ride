@@ -52,18 +52,3 @@ docker run -p 8080:8080 --env-file .env -v kiko-data:/data kiko-backend
 go test ./...
 go run .
 ```
-
-## TODO
-
-- [ ] **Ride completion.** There is no "completed" state, so a driver can be
-      paid out as soon as the rider pays, before the ride happens.
-- [ ] **Disputes.** Hook is in `store.beginPayout`; needs a rider endpoint and a
-      dispute window before payouts.
-- [ ] **Refunds and cancellation.** No way to cancel a ride or refund the rider
-      (e.g. driver no-show); requested rides never expire.
-- [x] **Driver authentication.** Driver requests are signed with the
-      driver's key (`X-Driver-Signature`, `X-Driver-Timestamp`).
-- [ ] **Rider access.** Anyone with a ride id can view the ride.
-- [ ] **Payout policy.** The server does not check payout outputs (amount,
-      destination, Kiko fee).
-- [ ] **Interface.** The server is a REST API; add a MCP.
