@@ -149,8 +149,10 @@ CREATE TABLE IF NOT EXISTS rides (
 	payout_tx     TEXT NOT NULL DEFAULT '',
 	-- claim_tx is the transaction being settled for the ride, so a second,
 	-- different payment is refused instead of charged twice. It survives a
-	-- restart: the first transaction may have settled meanwhile.
+	-- restart: the first transaction may have settled meanwhile. claimed_at
+	-- is when, in Unix seconds.
 	claim_tx      TEXT NOT NULL DEFAULT '',
+	claimed_at    INTEGER NOT NULL DEFAULT 0,
 	-- paying_out is set while a payout is being submitted, so two payouts
 	-- cannot race.
 	paying_out    INTEGER NOT NULL DEFAULT 0
@@ -191,6 +193,7 @@ func migrate(db *sql.DB) error {
 		{"drivers", "chain", `ALTER TABLE drivers ADD COLUMN chain TEXT NOT NULL DEFAULT 'cardano'`},
 		{"rides", "chain", `ALTER TABLE rides ADD COLUMN chain TEXT NOT NULL DEFAULT ''`},
 		{"rides", "fare", `ALTER TABLE rides RENAME COLUMN fare_lovelace TO fare`},
+		{"rides", "claimed_at", `ALTER TABLE rides ADD COLUMN claimed_at INTEGER NOT NULL DEFAULT 0`},
 	} {
 		ok, err := has(m.table, m.column)
 		if err != nil {
@@ -377,10 +380,16 @@ func (s *store) accept(rideID string, d Driver, payTo, script string, etaMinutes
 // transaction may claim again (settlement retries); another gets
 // errConflict.
 func (s *store) claim(rideID, txID string) (Ride, error) {
-	return s.update(rideID, `UPDATE rides SET claim_tx = ?
-		WHERE id = ? AND status = ? AND claim_tx IN ('', ?)`,
-		txID, rideID, StatusAccepted, txID)
+	now := time.Now()
+	return s.update(rideID, `UPDATE rides SET claim_tx = ?, claimed_at = ?
+		WHERE id = ? AND status = ? AND (claim_tx IN ('', ?) OR claimed_at < ?)`,
+		txID, now.Unix(), rideID, StatusAccepted, txID, now.Add(-claimHold).Unix())
 }
+
+// claimHold is how long a claim whose settlement was left unresolved keeps
+// other transactions out. A payment's TTL ends within maxTimeoutSeconds of
+// verification, so after this it can no longer land.
+const claimHold = time.Hour
 
 // finishClaim marks the ride paid when settled, otherwise frees the claim.
 func (s *store) finishClaim(rideID, txID string, settled bool) error {

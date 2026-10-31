@@ -21,21 +21,20 @@ import (
 	"kiko-backend/web"
 	"kiko-backend/x402"
 	"kiko-backend/x402/bsvfacilitator"
+	"kiko-backend/x402/cardanofacilitator"
 )
-
-// cfPreprodFacilitator is the Cardano Foundation's hosted preprod facilitator.
-const cfPreprodFacilitator = "https://x402.preprod.dev.ecosyseng.cf-deployments.org"
 
 // Environment:
 //
 //	KIKO_LISTEN_ADDR           default ":8080"
 //	CARDANO_NETWORK            mainnet | preprod (default) | preview
-//	X402_FACILITATOR_URL       defaults to the Cardano Foundation facilitator on preprod
+//	ADA_FACILITATOR_URL        optional external x402 facilitator for ADA fares; by default the
+//	                           built-in one (x402/cardanofacilitator) verifies and settles them through Koios
 //	KIKO_SERVER_MNEMONIC       BIP-39 mnemonic of Kiko's server cosigner keys
 //	KIKO_DB_PATH               SQLite database of drivers and rides (default "kiko.db")
 //	MAPBOX_ACCESS_TOKEN        Mapbox token for geocoding
 //	MAPBOX_PERMANENT           "true" for permanent geocoding (needed to store results)
-//	KOIOS_URL                  Koios base URL for submitting payouts (defaults to the public instance for the network)
+//	KOIOS_URL                  Koios base URL for rider payments and payouts (defaults to the public instance for the network)
 //	KOIOS_API_TOKEN            optional Koios bearer token; the public tier is used when unset
 //	BSV_ARC_URL, BSV_ARC_API_KEY  ARC endpoint ending in /v1 (and optional key); set it to accept BSV.
 //	                           Rider payments and driver payouts are broadcast through it.
@@ -57,14 +56,21 @@ func run() error {
 		walletNetwork = multisig.Mainnet
 	}
 
-	facilitatorURL := os.Getenv("X402_FACILITATOR_URL")
-	if facilitatorURL == "" {
-		if network != x402.Preprod {
-			return errors.New("X402_FACILITATOR_URL is required outside preprod")
-		}
-		facilitatorURL = cfPreprodFacilitator
+	chain, koiosURL, err := chainContext(string(network), walletNetwork)
+	if err != nil {
+		return err
 	}
-	networks := []x402.NetworkConfig{{Network: network, Facilitator: facilitator(facilitatorURL)}}
+	facilitatorURL := os.Getenv("ADA_FACILITATOR_URL")
+	var cardanoFacilitator x402.Facilitator = &cardanofacilitator.Facilitator{
+		Network: network,
+		Chain:   &cardanofacilitator.Koios{URL: koiosURL, Token: os.Getenv("KOIOS_API_TOKEN")},
+	}
+	if facilitatorURL != "" {
+		cardanoFacilitator = facilitator(facilitatorURL)
+	} else {
+		facilitatorURL = "built-in"
+	}
+	networks := []x402.NetworkConfig{{Network: network, Facilitator: cardanoFacilitator}}
 	bsv, err := bsvConfig(network)
 	if err != nil {
 		return err
@@ -91,11 +97,6 @@ func run() error {
 		return fmt.Errorf("KIKO_DB_PATH: %w", err)
 	}
 	defer db.Close()
-
-	chain, koiosURL, err := chainContext(string(network), walletNetwork)
-	if err != nil {
-		return err
-	}
 
 	token := os.Getenv("MAPBOX_ACCESS_TOKEN")
 	if token == "" {

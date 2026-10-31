@@ -315,6 +315,11 @@ func (s *Server) getRide(w http.ResponseWriter, r *http.Request) {
 		// The middleware answers 200 only after settlement succeeded.
 		if sw.status == http.StatusOK {
 			s.log.Info("ride paid", "ride", id, "tx", claimedTx, "chain", ride.Chain, "fare", ride.Fare)
+		} else if x402.Unresolved(sw.Header()) {
+			// The transaction may still land: keep the ride for it, so
+			// only a retry with the same payment can settle it.
+			s.log.Warn("ride payment unresolved", "ride", id, "tx", claimedTx, "status", sw.status)
+			return
 		} else {
 			s.log.Warn("ride payment not settled", "ride", id, "tx", claimedTx, "status", sw.status)
 		}

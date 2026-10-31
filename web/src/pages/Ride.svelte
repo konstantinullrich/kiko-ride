@@ -104,7 +104,10 @@
         payment = null
         signature = ''
       } else {
-        payError = r.settlement?.errorReason || r.reason || 'Payment was not accepted.'
+        const reason = r.settlement?.errorReason
+        payError = ['settlement_pending', 'unexpected_settle_error'].includes(reason)
+          ? 'Your payment may still land. Submit the same signature again; do not sign a new transaction.'
+          : reason || r.reason || 'Payment was not accepted.'
       }
     } catch (e) {
       payError = e.message
@@ -209,7 +212,7 @@
             {#if chainOf(req.network) === 'bsv'}
               <li>On BSV add an output locked by exactly this script, send the transaction in Extended Format (BRC-30), and use <code>&lt;txid&gt;:&lt;vout&gt;</code> of one of its inputs as the nonce.</li>
             {:else}
-              <li>On Cardano send the signed Conway transaction CBOR, with <code>&lt;txHash&gt;#&lt;index&gt;</code> of one of its inputs as the nonce.</li>
+              <li>On Cardano send the signed Conway transaction CBOR, valid for at most 10 minutes (its TTL), with <code>&lt;txHash&gt;#&lt;index&gt;</code> of one of its inputs as the nonce.</li>
             {/if}
             <li>Agents can do all of this through the MCP server at <code>/mcp</code>.</li>
           </ul>

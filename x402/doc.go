@@ -24,13 +24,16 @@
 // have no address such as bare multisig, and the payload transaction is raw
 // or Extended Format. The middleware checks only the shape of each network's
 // payTo, asset and transaction; whether the transaction pays is the
-// facilitator's call. Package bsvfacilitator is an in-process BSV
-// facilitator.
+// facilitator's call. Packages cardanofacilitator and bsvfacilitator are
+// in-process facilitators for Cardano, through Koios, and BSV.
 //
 // The flow follows the scheme's "authorization" model: an unpaid request gets
 // a 402 with PAYMENT-REQUIRED; the paid retry's PAYMENT-SIGNATURE is checked
 // against the prices, verified by the facilitator, the handler runs with its
 // response held back, and the response is released with PAYMENT-RESPONSE only
 // after the facilitator settles. Handler responses with status >= 400 are
-// released without settling, so the client is not charged.
+// released without settling, so the client is not charged. A settlement
+// still pending, or one the facilitator failed to answer, may yet land:
+// Unresolved tells those apart, and the client retries with the same
+// PAYMENT-SIGNATURE.
 package x402

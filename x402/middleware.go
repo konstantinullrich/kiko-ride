@@ -305,6 +305,22 @@ func (m *Middleware) paymentRequired(w http.ResponseWriter, resource ResourceInf
 	w.Write(raw)
 }
 
+// Unresolved reports whether the PAYMENT-RESPONSE in a paid request's
+// response headers leaves the payment undecided: settlement is pending, or
+// the facilitator failed without a verdict. The transaction may still land,
+// so what it pays for should stay reserved for it.
+func Unresolved(h http.Header) bool {
+	raw, err := base64.StdEncoding.DecodeString(h.Get(HeaderPaymentResponse))
+	if err != nil || len(raw) == 0 {
+		return false
+	}
+	var resp SettleResponse
+	if json.Unmarshal(raw, &resp) != nil {
+		return false
+	}
+	return !resp.Success && (resp.ErrorReason == ReasonSettlementPending || resp.ErrorReason == ReasonUnexpectedSettle)
+}
+
 func (m *Middleware) settleFailed(w http.ResponseWriter, resp SettleResponse) {
 	resp.Success = false
 	raw, err := json.Marshal(resp)

@@ -12,7 +12,8 @@ which the server cosigns and submits.
   as an MCP server at `/mcp` ([tools](api/endpoints.md#mcp-server))
 - `multisig/` — CIP-1854 multisig wallets and the server cosigner
 - `bsvmultisig/` — the same for Bitcoin SV (bare 2-of-3 multisig)
-- `x402/` — x402 payment middleware
+- `x402/` — x402 payment middleware, with built-in facilitators for Cardano
+  (through Koios) and BSV (through ARC)
 - `geo/` — geocoding (Mapbox) and distances
 
 ## Run
@@ -37,8 +38,8 @@ docker run -p 8080:8080 --env-file .env -v kiko-data:/data kiko-backend
 | `KIKO_SERVER_MNEMONIC`     | yes      | BIP-39 mnemonic of the server's cosigner keys. Keep it secret.    |
 | `MAPBOX_ACCESS_TOKEN`      | yes      | Mapbox token for geocoding                                        |
 | `CARDANO_NETWORK`          | no       | `preprod` (default), `preview` or `mainnet`                       |
-| `X402_FACILITATOR_URL`     | no       | Required outside preprod; defaults to the Cardano Foundation's    |
-| `KOIOS_URL`                | no       | Koios base URL; defaults to the public instance for the network   |
+| `ADA_FACILITATOR_URL`      | no       | External x402 facilitator for ADA fares; the built-in one, which settles through Koios, is used when unset |
+| `KOIOS_URL`                | no       | Koios base URL for rider payments and payouts; defaults to the public instance for the network |
 | `KOIOS_API_TOKEN`          | no       | Koios bearer token; the public tier is used when unset            |
 | `BSV_ARC_URL`              | no       | ARC endpoint ending in `/v1`; enables BSV drivers and riders and broadcasts their transactions (`BSV_ARC_API_KEY` optional) |
 | `BSV_FACILITATOR_URL`      | no       | External x402 facilitator for BSV fares; the built-in one is used when unset |

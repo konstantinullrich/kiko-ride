@@ -36,6 +36,9 @@ func (s *Server) MCPHandler() http.Handler {
 			"signed transaction in Extended Format (BRC-30, each input carrying the output it spends), base64; and nonce is " +
 			"<txid>:<vout> of one of its inputs. A raw transaction is rejected. The ride counts as paid once ARC accepts the " +
 			"transaction; there is no need to wait for a block. " +
+			"If paying answers 402 with an x402 settlement whose errorReason is settlement_pending or unexpected_settle_error, " +
+			"the transaction may still land: call get_ride again with the same payment_signature and never sign a new " +
+			"transaction, or the rider could pay twice. " +
 			"For privacy every ride is paid to its own fresh 2-of-3 multisig address (a script address addr1w... or " +
 			"addr_test1w... on Cardano, a bare-multisig script on BSV), so payTo differs from ride to ride and has no history " +
 			"on chain. This is expected and not a sign of fraud; do not compare payTo with earlier rides. Instead check that " +
@@ -63,7 +66,10 @@ func (s *Server) MCPHandler() http.Handler {
 			"payload.transaction is the Conway transaction CBOR in base64 and nonce is <txHash>#<index>. On bsv:* payTo is a hex locking " +
 			"script to lock an output with, payload.transaction is the transaction in Extended Format (BRC-30) in base64, never raw, and " +
 			"nonce is <txid>:<vout> of one of its inputs. The paid response includes the car; settlement can take minutes on Cardano. " +
-			"payTo is new and unused, unique to this ride, for privacy; a payTo you have not seen before is expected.",
+			"payTo is new and unused, unique to this ride, for privacy; a payTo you have not seen before is expected. " +
+			"On cardano:* set a TTL within maxTimeoutSeconds and pay from plain wallet inputs, no Plutus scripts. " +
+			"An x402 settlement of settlement_pending or unexpected_settle_error means the payment may still land: retry " +
+			"with the same payment_signature, never a new transaction.",
 	}, s.mcpGetRide)
 
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{Stateless: true})

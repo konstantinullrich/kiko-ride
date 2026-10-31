@@ -260,6 +260,15 @@ Free while the ride is `requested`, `paid` or `paid_out`. While it is
    | `cardano:*` | Conway transaction CBOR   | `<txHash>#<index>`   |
    | `bsv:*`     | Extended Format (BRC-30)  | `<txid>:<vout>`      |
 
+   On Cardano the server's built-in facilitator checks the transaction
+   against the chain through Koios: an output pays at least `amount` to
+   `payTo`, the `nonce` and every other input are unspent, inputs equal
+   outputs plus fee, the fee meets the current minimum, the TTL is set and at
+   most `maxTimeoutSeconds` away, and the payment output holds the minimum
+   UTxO value. Pay from a plain wallet: transactions that mint, withdraw,
+   carry certificates or governance actions, or run Plutus scripts are
+   refused. It submits the transaction and waits for one confirmation.
+
    On BSV the server's built-in facilitator executes every input script, so
    each input must carry the output it spends (Extended Format). It accepts
    the payment when one output pays exactly `amount` to `payTo` and the
@@ -270,12 +279,18 @@ Free while the ride is `requested`, `paid` or `paid_out`. While it is
    success it answers `200` with the ride (`paid`, including `car`) and a
    `PAYMENT-RESPONSE` header. Settlement can take minutes.
 
+   If it answers `402` with a `PAYMENT-RESPONSE` whose `errorReason` is
+   `settlement_pending` or `unexpected_settle_error`, the transaction may
+   still land. Retry with the **same** `PAYMENT-SIGNATURE`; never sign a new
+   transaction. Until then the ride stays reserved for that transaction:
+   another one gets `409` for up to an hour.
+
 | Status | When                                                     |
 | ------ | -------------------------------------------------------- |
 | 200    | ride returned (or just paid)                             |
 | 402    | payment required, invalid, or settlement failed; retry   |
 | 404    | unknown ride                                             |
-| 409    | another transaction is already paying this ride          |
+| 409    | another transaction is already paying this ride, or may still land |
 
 ---
 

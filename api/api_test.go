@@ -63,6 +63,7 @@ func (fakeGeocoder) Search(_ context.Context, query string, limit int) ([]geo.Pl
 
 type fakeFacilitator struct {
 	settle  x402.SettleResponse
+	err     error
 	settled int
 }
 
@@ -72,7 +73,7 @@ func (f *fakeFacilitator) Verify(context.Context, x402.PaymentPayload, x402.Paym
 
 func (f *fakeFacilitator) Settle(context.Context, x402.PaymentPayload, x402.PaymentRequirements) (x402.SettleResponse, error) {
 	f.settled++
-	return f.settle, nil
+	return f.settle, f.err
 }
 
 // fakeChain records submitted transactions, failing while reject is set.
@@ -380,6 +381,38 @@ func TestFailedSettlementKeepsRideUnpaid(t *testing.T) {
 	expect(t, e.paid(t, "/api/v1/ride/"+ride.ID, req), http.StatusPaymentRequired)
 	// Still unpaid, and the claim was released so the rider can pay again.
 	expect(t, e.do(t, http.MethodGet, "/api/v1/ride/"+ride.ID, "", nil), http.StatusPaymentRequired)
+	if r, _ := e.s.store.ride(ride.ID); r.Status != StatusAccepted {
+		t.Fatalf("unexpected ride: %+v", r)
+	}
+	if _, err := e.s.store.claim(ride.ID, "other"); err != nil {
+		t.Fatal("a failed payment must free the ride:", err)
+	}
+}
+
+func TestUnresolvedSettlementKeepsClaim(t *testing.T) {
+	for _, reason := range []string{x402.ReasonSettlementPending, ""} {
+		e := newEnv(t)
+		e.facilitator.settle = x402.SettleResponse{ErrorReason: reason, Transaction: "tx"}
+		if reason == "" {
+			e.facilitator.err = errors.New("504 Gateway Time-out")
+		}
+		d := e.registerDriver(t)
+		ride := e.createRide(t)
+		expect(t, e.do(t, http.MethodPost, "/api/v1/driver/drive/"+ride.ID, d.PublicKey, map[string]any{"eta_minutes": 4}), http.StatusOK)
+		req := decode[x402.PaymentRequired](t, e.do(t, http.MethodGet, "/api/v1/ride/"+ride.ID, "", nil)).Accepts[0]
+		expect(t, e.paid(t, "/api/v1/ride/"+ride.ID, req), http.StatusPaymentRequired)
+
+		// The transaction may still land, so no other one can pay the ride.
+		if _, err := e.s.store.claim(ride.ID, "other"); !errors.Is(err, errConflict) {
+			t.Fatalf("%q: another transaction claimed the ride: %v", reason, err)
+		}
+		// Retrying the same payment settles it.
+		e.facilitator.settle, e.facilitator.err = x402.SettleResponse{Success: true, Transaction: "tx"}, nil
+		expect(t, e.paid(t, "/api/v1/ride/"+ride.ID, req), http.StatusOK)
+		if r, _ := e.s.store.ride(ride.ID); r.Status != StatusPaid {
+			t.Fatalf("%q: retry left the ride %s", reason, r.Status)
+		}
+	}
 }
 
 func TestClaimRefusesSecondTransaction(t *testing.T) {
@@ -402,6 +435,23 @@ func TestClaimRefusesSecondTransaction(t *testing.T) {
 	}
 	if _, err := s.claim(r.ID, "tx2"); !errors.Is(err, errConflict) {
 		t.Fatal("second transaction must be refused, got", err)
+	}
+	// A claim left unresolved for longer than any payment can land in
+	// gives way.
+	if _, err := s.db.Exec(`UPDATE rides SET claimed_at = ? WHERE id = ?`, time.Now().Add(-claimHold-time.Minute).Unix(), r.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.claim(r.ID, "tx2"); err != nil {
+		t.Fatal("stale claim must give way:", err)
+	}
+	if _, err := s.claim(r.ID, "tx1"); !errors.Is(err, errConflict) {
+		t.Fatal("the new claim must hold, got", err)
+	}
+	if err := s.finishClaim(r.ID, "tx2", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.claim(r.ID, "tx1"); err != nil {
+		t.Fatal("a released ride must be claimable:", err)
 	}
 	if err := s.finishClaim(r.ID, "tx1", true); err != nil {
 		t.Fatal(err)
