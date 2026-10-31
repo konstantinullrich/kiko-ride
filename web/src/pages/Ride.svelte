@@ -126,8 +126,8 @@
     <h1>Where to?</h1>
 
     <form class="panel form" onsubmit={(e) => (e.preventDefault(), order())}>
-      <AddressInput label="Pickup" placeholder="Berlin Hbf" bind:value={from} bind:point={fromPoint} />
-      <AddressInput label="Drop-off" placeholder="Alexanderplatz" bind:value={to} bind:point={toPoint} />
+      <AddressInput label="Pickup" placeholder="München Hbf" bind:value={from} bind:point={fromPoint} />
+      <AddressInput label="Drop-off" placeholder="Chinesischer Turm" bind:value={to} bind:point={toPoint} />
       <label>
         Pickup time
         <input type="datetime-local" bind:value={pickup} required />

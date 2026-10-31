@@ -2,12 +2,15 @@
   import { link } from '../lib/router.svelte.js'
 
   const session = [
-    ['$', 'kiko ride --from "Berlin Hbf" --to "Alexanderplatz"'],
-    ['quote', '3.01 km · 3.505 ADA | 35,000 sat'],
-    ['accepted', 'driver 4 min away · fare locked'],
-    ['402', 'pay to fresh 2-of-3 script 5221…53ae'],
-    ['settled', 'tx 8e46…4118 ✓  car: red Tesla 3'],
+    ['$', 'claude mcp add --transport http kiko https://kiko.wtf/mcp'],
+    ['added', 'kiko · search_address quote_ride request_ride get_ride'],
+    ['>', 'get me a ride from München Hbf to Chinesischer Turm'],
+    ['quote', 'quote_ride → 3.01 km · 3.505 ADA | 35,000 sat'],
+    ['accepted', 'request_ride → driver 4 min away · fare locked'],
+    ['402', 'get_ride → pay to fresh 2-of-3 script 5221…53ae'],
+    ['settled', 'get_ride → tx 8e46…4118 ✓  car: red Tesla 3'],
   ]
+  const prompts = ['$', '>']
   let shown = $state(1)
   $effect(() => {
     const timer = setInterval(() => (shown = shown >= session.length ? 1 : shown + 1), 1400)
@@ -51,11 +54,11 @@
 </section>
 
 <section class="wrap">
-  <div class="terminal panel mono" aria-label="Example ride session">
-    <div class="bar"><span></span><span></span><span></span><em>rider@kiko:~</em></div>
+  <div class="terminal panel mono" aria-label="Example agent ride session over MCP">
+    <div class="bar"><span></span><span></span><span></span><em>agent@kiko:~</em></div>
     {#each session.slice(0, shown) as [key, value], i}
-      <p class:prompt={key === '$'}>
-        <b>{key === '$' ? '$' : key.padEnd(9)}</b><span class:cursor={i === shown - 1}>{value}</span>
+      <p class:prompt={prompts.includes(key)}>
+        <b>{prompts.includes(key) ? key : key.padEnd(9)}</b><span class:cursor={i === shown - 1}>{value}</span>
       </p>
     {/each}
   </div>
@@ -226,7 +229,7 @@
   .terminal {
     padding: 0 1.25rem 1.25rem;
     font-size: 0.9rem;
-    min-height: 15.5rem;
+    min-height: 20rem;
     overflow-x: auto;
   }
 
